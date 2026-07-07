@@ -1,7 +1,7 @@
 From 3edff84dd68b061100cde0845bee5c235e3ee7ae Mon Sep 17 00:00:00 2001
 From: VocalEdit <vocaledit@example.com>
 Date: Tue, 7 Jul 2026 00:37:55 +0000
-Subject: [PATCH] Add lyric edit audio infilling controls
+Subject: [PATCH 1/2] Add lyric edit audio infilling controls
 
 ---
  src/YingMusicSinger/infer/YingMusicSinger.py | 126 ++++++++++++++++---
@@ -281,6 +281,127 @@ index 6b5c0e8..1068ba7 100644
          else:
              midi = torch.zeros_like(midi)
  
+-- 
+2.34.1
+
+
+From 96473dd33c20e217f25afd0b03261eb5fa1c67a5 Mon Sep 17 00:00:00 2001
+From: VocalEdit <vocaledit@example.com>
+Date: Tue, 7 Jul 2026 01:05:57 +0000
+Subject: [PATCH 2/2] Document lyric edit inference masks
+
+---
+ src/YingMusicSinger/infer/YingMusicSinger.py | 14 ++++++++++++++
+ src/YingMusicSinger/models/model.py          |  8 +++++++-
+ 2 files changed, 21 insertions(+), 1 deletion(-)
+
+diff --git a/src/YingMusicSinger/infer/YingMusicSinger.py b/src/YingMusicSinger/infer/YingMusicSinger.py
+index c39b716..26c4052 100644
+--- a/src/YingMusicSinger/infer/YingMusicSinger.py
++++ b/src/YingMusicSinger/infer/YingMusicSinger.py
+@@ -106,6 +106,7 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+         edit_mask_start_offset_sec=0.0,
+         edit_mask_end_offset_sec=0.0,
+     ):
++        # 局部歌词编辑时不额外指定音色参考；直接复用原始 melody 音频作为音色 prompt。
+         if ref_audio_path is None:
+             ref_audio_path = melody_audio_path
+ 
+@@ -132,6 +133,8 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+         ref_latent_len = ref_latent.shape[1]
+         target_latent_len = melody_latent.shape[1]
+         total_len = int(ref_latent_len + target_latent_len)
++        # full_audio_latent 同时包含前半段音色 prompt 和后半段原始 melody prompt。
++        # 后续会用 audio_cond_mask 决定哪些位置保留原始 latent，哪些位置交给模型生成。
+         full_audio_latent = torch.cat([ref_latent, melody_latent], dim=1)
+         audio_cond_mask = None
+         midi_prompt_mask = None
+@@ -149,6 +152,7 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+             if edit_mask_start_offset_sec < 0 or edit_mask_end_offset_sec < 0:
+                 raise ValueError("edit mask offsets must be non-negative")
+ 
++            # offset 只允许扩大编辑区域：起点向前、终点向后；不会缩小原始歌词修改区间。
+             mask_start_sec = max(0.0, edit_start_sec - edit_mask_start_offset_sec)
+             mask_end_sec = edit_end_sec + edit_mask_end_offset_sec
+             target_start = int(mask_start_sec * self.vae_frame_rate)
+@@ -160,6 +164,8 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+                     "edit_start_sec/edit_end_sec produced an empty latent mask span"
+                 )
+ 
++            # audio_cond_mask=True 表示该位置使用原始音频 latent 作为条件并在采样后回填；
++            # audio_cond_mask=False 表示该位置被 mask，由模型根据歌词和旋律条件重新生成。
+             audio_cond_mask = torch.ones(
+                 (1, total_len), dtype=torch.bool, device=self.device
+             )
+@@ -167,6 +173,8 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+                 :, ref_latent_len + target_start : ref_latent_len + target_end
+             ] = False
+ 
++            # MIDI/melody 条件不跟随音频 mask 一起遮蔽；目标段仍保留旋律信息。
++            # 这里只把前半段 ref prompt 视为 prompt 区域，避免参考段 melody 泄漏到生成目标。
+             midi_prompt_mask = torch.zeros(
+                 (1, total_len), dtype=torch.bool, device=self.device
+             )
+@@ -281,9 +289,13 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+             edit_mask_start_offset_sec=edit_mask_start_offset_sec,
+             edit_mask_end_offset_sec=edit_mask_end_offset_sec,
+         )
++        # 普通推理只给 ref_latent 作为条件；局部编辑时给完整音频 latent，
++        # 具体保留/生成哪些位置由 audio_cond_mask 控制。
+         audio_cond = full_audio_latent if audio_cond_mask is not None else ref_latent
+         prompt_lens = None
+         if audio_cond_mask is not None:
++            # lens 仍保持 ref 段长度，用来维持原模型对 prompt 长度的约束；
++            # target 段是否作为音频条件由 audio_cond_mask 单独决定。
+             prompt_lens = torch.tensor([ref_latent_len], device=self.device, dtype=torch.long)
+ 
+         assert midi_p is not None and bound_p is not None
+@@ -308,6 +320,8 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+             )
+         generated_latent = generated_latent.to(torch.float32)
+         if audio_cond_mask is not None:
++            # 采样后执行“硬回填”：未 mask 的位置替换回原始 latent，
++            # 只有 mask 区间保留模型生成结果，尽量保证未修改歌词区域不变。
+             replace_len = min(
+                 generated_latent.shape[1],
+                 full_audio_latent.shape[1],
+diff --git a/src/YingMusicSinger/models/model.py b/src/YingMusicSinger/models/model.py
+index 1068ba7..7c7e152 100644
+--- a/src/YingMusicSinger/models/model.py
++++ b/src/YingMusicSinger/models/model.py
+@@ -267,6 +267,8 @@ class Singer(nn.Module):
+ 
+         assert isinstance(text, torch.Tensor)
+ 
++        # prompt_cond_mask 是原模型的 prompt 区域定义；局部编辑时会进一步拆成
++        # audio_cond_mask 和 midi_prompt_mask，分别控制音频条件与旋律条件。
+         prompt_cond_mask = lens_to_mask(lens)
+ 
+         if edit_mask is not None:
+@@ -278,6 +280,8 @@ class Singer(nn.Module):
+             audio_cond_mask = audio_cond_mask.to(device=device, dtype=torch.bool)
+             assert audio_cond_mask.shape[0] == batch, "audio_cond_mask batch mismatch"
+ 
++        # audio_cond_mask=False 的区域会把音频条件置零，让模型生成；
++        # midi_prompt_mask 独立控制 melody 置零范围，使目标段可以继续使用原旋律。
+         if midi_prompt_mask is None:
+             midi_prompt_mask = prompt_cond_mask
+         else:
+@@ -320,11 +324,13 @@ class Singer(nn.Module):
+         )
+         audio_cond_mask = audio_cond_mask.unsqueeze(-1)
+         midi_prompt_mask = midi_prompt_mask.unsqueeze(-1)
++        # 音频条件只在 audio_cond_mask=True 的位置输入 transformer；mask 区域置零。
+         step_cond = torch.where(audio_cond_mask, cond, torch.zeros_like(cond))
+ 
+         assert max_duration == midi.shape[1]
+ 
+-        # Zero out melody only in the prompt region; edit mode can keep target melody while masking target audio.
++        # 旋律条件只在 midi_prompt_mask=True 的 prompt 区域置零；
++        # target 段即使音频被 mask，也仍然保留 melody/MIDI 条件。
+         if enable_melody_control:
+             midi = torch.where(midi_prompt_mask, torch.zeros_like(midi), midi)
+         else:
 -- 
 2.34.1
 
