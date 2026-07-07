@@ -79,25 +79,22 @@ def is_lyric_token(token: str, note_type: int) -> bool:
     return token not in {"<SP>", "<AP>"} and note_type in {2, 3}
 
 
-def g2p_edited_lyrics(edited_lyrics: str, language: str, soulx_root: Path) -> list[str]:
+def g2p_chars(chars: list[str], language: str, soulx_root: Path) -> list[str]:
     sys.path.insert(0, str(soulx_root.resolve()))
     from preprocess.tools.g2p import g2p_transform  # type: ignore
 
-    chars = list(edited_lyrics)
     phonemes = g2p_transform(chars, language)
     if len(phonemes) != len(chars):
         raise SoulXTaskError(
-            f"g2p length mismatch: lyrics={len(chars)} phonemes={len(phonemes)}"
+            f"g2p length mismatch: chars={len(chars)} phonemes={len(phonemes)}"
         )
     return phonemes
 
 
-def rewrite_segment_for_edited_lyrics(
+def rewrite_segment_for_task(
     segment: dict[str, Any],
-    edited_chars: list[str],
-    edited_phonemes: list[str],
-    *,
-    expected_original_lyrics: str,
+    task: dict[str, Any],
+    replacement_phonemes: list[str],
 ) -> dict[str, Any]:
     words = str(segment["text"]).split()
     phonemes = str(segment["phoneme"]).split()
@@ -109,17 +106,35 @@ def rewrite_segment_for_edited_lyrics(
             f"text={len(words)} phoneme={len(phonemes)} note_type={len(note_types)}"
         )
 
+    char_start = int(task["char_start"])
+    char_end = int(task["char_end"])
+    original_word = str(task["original_word"])
+    replacement_word = str(task["replacement_word"])
+    original_chars: list[str] = []
     rewritten_words = list(words)
     rewritten_phonemes = list(phonemes)
-    original_chars: list[str] = []
     current_char_index: int | None = None
+
+    if char_end <= char_start:
+        raise SoulXTaskError(f"Invalid edit span: char_start={char_start}, char_end={char_end}")
+    if len(original_word) != char_end - char_start:
+        raise SoulXTaskError(
+            f"original_word length does not match edit span: {original_word!r}, "
+            f"span={char_start}:{char_end}"
+        )
+    if len(replacement_word) != len(original_word):
+        raise SoulXTaskError(
+            f"replacement_word length must match original_word: "
+            f"{replacement_word!r} vs {original_word!r}"
+        )
+    if len(replacement_phonemes) != len(replacement_word):
+        raise SoulXTaskError(
+            f"replacement phoneme length mismatch: {len(replacement_phonemes)} != {len(replacement_word)}"
+        )
 
     for idx, (word, note_type) in enumerate(zip(words, note_types)):
         normalized = word.replace("<AP>", "<SP>")
         if normalized == "<SP>" or note_type == 1:
-            rewritten_words[idx] = "<SP>"
-            rewritten_phonemes[idx] = "<SP>"
-            current_char_index = None
             continue
 
         if note_type == 2:
@@ -127,28 +142,28 @@ def rewrite_segment_for_edited_lyrics(
             original_chars.append(normalized)
         elif note_type == 3:
             if current_char_index is None:
-                raise SoulXTaskError("note_type=3 appears before any note_type=2 lyric token")
+                if not original_chars:
+                    raise SoulXTaskError("note_type=3 appears before any note_type=2 lyric token")
+                current_char_index = len(original_chars) - 1
         else:
             raise SoulXTaskError(f"Unsupported note_type={note_type}")
 
-        if current_char_index >= len(edited_chars):
-            raise SoulXTaskError(
-                f"edited lyric is shorter than metadata lyric at token {idx}: "
-                f"char_index={current_char_index}, edited_len={len(edited_chars)}"
-            )
-        rewritten_words[idx] = edited_chars[current_char_index]
-        rewritten_phonemes[idx] = edited_phonemes[current_char_index]
+        if char_start <= current_char_index < char_end:
+            replacement_idx = current_char_index - char_start
+            rewritten_words[idx] = replacement_word[replacement_idx]
+            rewritten_phonemes[idx] = replacement_phonemes[replacement_idx]
 
     original_lyrics = "".join(original_chars)
+    expected_original_lyrics = str(task["original_lyrics"])
     if original_lyrics != expected_original_lyrics:
         raise SoulXTaskError(
             f"metadata lyrics do not match task original_lyrics: "
             f"{original_lyrics!r} != {expected_original_lyrics!r}"
         )
-    if len(edited_chars) != len(original_chars):
+    if original_lyrics[char_start:char_end] != original_word:
         raise SoulXTaskError(
-            f"edited lyrics length must match metadata lyrics length: "
-            f"{len(edited_chars)} != {len(original_chars)}"
+            f"metadata edit span does not match original_word: "
+            f"{original_lyrics[char_start:char_end]!r} != {original_word!r}"
         )
 
     rewritten = dict(segment)
@@ -164,17 +179,9 @@ def make_target_metadata(task: dict[str, Any], metadata: list[dict[str, Any]], s
         )
     segment = metadata[0]
     language = str(segment.get("language") or "Mandarin")
-    edited_lyrics = str(task["edited_lyrics"])
-    edited_chars = list(edited_lyrics)
-    edited_phonemes = g2p_edited_lyrics(edited_lyrics, language, soulx_root)
-    return [
-        rewrite_segment_for_edited_lyrics(
-            segment,
-            edited_chars,
-            edited_phonemes,
-            expected_original_lyrics=str(task["original_lyrics"]),
-        )
-    ]
+    replacement_chars = list(str(task["replacement_word"]))
+    replacement_phonemes = g2p_chars(replacement_chars, language, soulx_root)
+    return [rewrite_segment_for_task(segment, task, replacement_phonemes)]
 
 
 def build_soulx_command(
