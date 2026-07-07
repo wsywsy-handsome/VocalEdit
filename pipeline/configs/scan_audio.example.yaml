@@ -1,0 +1,18 @@
+# Example configuration for the discovery stage.
+# The current discovery script is CLI-driven; this file records the intended
+# settings for a run and can become the source config when the pipeline runner
+# is added.
+
+dataset_root: /path/to/dataset
+output_manifest: pipeline/manifests/00_discovered.jsonl
+
+extensions:
+  - .wav
+  - .flac
+  - .mp3
+  - .m4a
+  - .ogg
+
+include_hidden: false
+follow_symlinks: false
+

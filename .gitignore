@@ -1,0 +1,36 @@
+# Secrets and local env files
+.env
+*.env
+pipeline/.env
+
+# Generated datasets and run artifacts
+data/
+pipeline/runs/
+pipeline/manifests/*.jsonl
+pipeline/manifests/*.json
+
+# Upstream projects are separate git repositories.
+SoulX-Singer/
+YingMusic-Singer-Plus/
+
+# Model weights and checkpoints
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+ckpts/
+checkpoints/
+models/
+
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.cache/
+
+# OS/editor files
+.DS_Store
+.vscode/
+.idea/
