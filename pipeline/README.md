@@ -508,6 +508,25 @@ conda run -n ymsp streamlit run pipeline/scripts/view_lyric_edit_tasks.py \
   --server.port 8501
 ```
 
+
+## 上游项目补丁
+
+根仓库的 `patches/` 目录保存了本工作流对两个上游项目的本地改动：
+
+```text
+patches/0001-Add-lyric-edit-audio-infilling-controls.patch
+patches/0001-Patch-English-ASR-sampler-compatibility.patch
+```
+
+如果在新服务器上重新 clone 原始上游仓库，可以在对应项目目录中应用补丁：
+
+```bash
+git -C YingMusic-Singer-Plus apply ../patches/0001-Add-lyric-edit-audio-infilling-controls.patch
+git -C SoulX-Singer apply ../patches/0001-Patch-English-ASR-sampler-compatibility.patch
+```
+
+如果你已经把两个子仓库也推到了自己的 fork，可以直接 clone fork，不需要再 apply patch。
+
 ## 常见问题
 
 ### DeepSeek API 报错

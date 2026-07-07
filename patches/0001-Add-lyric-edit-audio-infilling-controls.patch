@@ -1,0 +1,286 @@
+From 3edff84dd68b061100cde0845bee5c235e3ee7ae Mon Sep 17 00:00:00 2001
+From: VocalEdit <vocaledit@example.com>
+Date: Tue, 7 Jul 2026 00:37:55 +0000
+Subject: [PATCH] Add lyric edit audio infilling controls
+
+---
+ src/YingMusicSinger/infer/YingMusicSinger.py | 126 ++++++++++++++++---
+ src/YingMusicSinger/models/model.py          |  39 ++++--
+ 2 files changed, 142 insertions(+), 23 deletions(-)
+
+diff --git a/src/YingMusicSinger/infer/YingMusicSinger.py b/src/YingMusicSinger/infer/YingMusicSinger.py
+index 6695ffd..c39b716 100644
+--- a/src/YingMusicSinger/infer/YingMusicSinger.py
++++ b/src/YingMusicSinger/infer/YingMusicSinger.py
+@@ -101,7 +101,14 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+         target_text,
+         sil_len_to_end,
+         lrc_align_mode,
++        edit_start_sec=None,
++        edit_end_sec=None,
++        edit_mask_start_offset_sec=0.0,
++        edit_mask_end_offset_sec=0.0,
+     ):
++        if ref_audio_path is None:
++            ref_audio_path = melody_audio_path
++
+         ref_audio, ref_audio_sr = torchaudio.load(ref_audio_path)
+         silence = torch.zeros(ref_audio.shape[0], int(ref_audio_sr * sil_len_to_end))
+         ref_wav = torch.cat([ref_audio, silence], dim=1)
+@@ -109,9 +116,10 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+             1, 2
+         )  # [B, T, D]
+ 
+-
+         melody_audio, melody_sr = torchaudio.load(melody_audio_path)
+-        silence = torch.zeros(melody_audio.shape[0], int(melody_sr * self.rear_silent_time))
++        silence = torch.zeros(
++            melody_audio.shape[0], int(melody_sr * self.rear_silent_time)
++        )
+         melody_wav = torch.cat([melody_audio, silence], dim=1)
+         melody_latent = self.vae.encode_audio(melody_wav, in_sr=melody_sr).transpose(
+             1, 2
+@@ -122,7 +130,47 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+             midi_in = torch.zeros_like(midi_in)
+ 
+         ref_latent_len = ref_latent.shape[1]
+-        total_len = int(ref_latent.shape[1] + melody_latent.shape[1])
++        target_latent_len = melody_latent.shape[1]
++        total_len = int(ref_latent_len + target_latent_len)
++        full_audio_latent = torch.cat([ref_latent, melody_latent], dim=1)
++        audio_cond_mask = None
++        midi_prompt_mask = None
++
++        if edit_start_sec is not None or edit_end_sec is not None:
++            if edit_start_sec is None or edit_end_sec is None:
++                raise ValueError("edit_start_sec and edit_end_sec must be provided together")
++
++            edit_start_sec = float(edit_start_sec)
++            edit_end_sec = float(edit_end_sec)
++            edit_mask_start_offset_sec = float(edit_mask_start_offset_sec)
++            edit_mask_end_offset_sec = float(edit_mask_end_offset_sec)
++            if edit_end_sec <= edit_start_sec:
++                raise ValueError("edit_end_sec must be greater than edit_start_sec")
++            if edit_mask_start_offset_sec < 0 or edit_mask_end_offset_sec < 0:
++                raise ValueError("edit mask offsets must be non-negative")
++
++            mask_start_sec = max(0.0, edit_start_sec - edit_mask_start_offset_sec)
++            mask_end_sec = edit_end_sec + edit_mask_end_offset_sec
++            target_start = int(mask_start_sec * self.vae_frame_rate)
++            target_end = int(mask_end_sec * self.vae_frame_rate + 0.999999)
++            target_start = max(0, min(target_start, target_latent_len))
++            target_end = max(0, min(target_end, target_latent_len))
++            if target_end <= target_start:
++                raise ValueError(
++                    "edit_start_sec/edit_end_sec produced an empty latent mask span"
++                )
++
++            audio_cond_mask = torch.ones(
++                (1, total_len), dtype=torch.bool, device=self.device
++            )
++            audio_cond_mask[
++                :, ref_latent_len + target_start : ref_latent_len + target_end
++            ] = False
++
++            midi_prompt_mask = torch.zeros(
++                (1, total_len), dtype=torch.bool, device=self.device
++            )
++            midi_prompt_mask[:, :ref_latent_len] = True
+ 
+         if self._need_midi:
+             ref_mel = self.melody_spectrogram_extract(audio=ref_wav, sr=ref_audio_sr)
+@@ -163,12 +211,15 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+ 
+         return (
+             ref_latent,
++            full_audio_latent,
+             ref_latent_len,
+             text_tokens,
+             total_len,
+             midi_in,
+             midi_p,
+             bound_p,
++            audio_cond_mask,
++            midi_prompt_mask,
+         )
+ 
+     def forward(
+@@ -184,10 +235,14 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+         cfg_strength: float = 3.0,
+         seed: int = 666,
+         is_tts_pretrain: bool = False,
++        edit_start_sec: float | None = None,
++        edit_end_sec: float | None = None,
++        edit_mask_start_offset_sec: float = 0.0,
++        edit_mask_end_offset_sec: float = 0.0,
+     ):
+         """
+         Args:
+-            ref_audio_path:    Path to the reference audio (for timbre)
++            ref_audio_path:    Path to the reference audio (for timbre). If None, melody_audio_path is reused.
+             melody_audio_path: Path to the melody reference audio (provides target duration and melody information)
+             ref_text:          Text corresponding to the reference audio
+             target_text:       Target text to be synthesized
+@@ -198,25 +253,47 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+             cfg_strength:      CFG strength
+             seed:              Random seed
+             is_tts_pretrain:   If True, melody is not provided (TTS mode)
++            edit_start_sec:    Start time in melody audio to mask for lyric editing
++            edit_end_sec:      End time in melody audio to mask for lyric editing
++            edit_mask_start_offset_sec: Extra seconds to expand the mask before edit_start_sec
++            edit_mask_end_offset_sec:   Extra seconds to expand the mask after edit_end_sec
+         """
+-        ref_latent, ref_latent_len, text_tokens, total_len, midi_in, midi_p, bound_p = (
+-            self.prepare_input(
+-                ref_audio_path=ref_audio_path,
+-                melody_audio_path=melody_audio_path,
+-                ref_text=ref_text,
+-                target_text=target_text,
+-                sil_len_to_end=sil_len_to_end,
+-                lrc_align_mode=lrc_align_mode,
+-            )
++        (
++            ref_latent,
++            full_audio_latent,
++            ref_latent_len,
++            text_tokens,
++            total_len,
++            midi_in,
++            midi_p,
++            bound_p,
++            audio_cond_mask,
++            midi_prompt_mask,
++        ) = self.prepare_input(
++            ref_audio_path=ref_audio_path,
++            melody_audio_path=melody_audio_path,
++            ref_text=ref_text,
++            target_text=target_text,
++            sil_len_to_end=sil_len_to_end,
++            lrc_align_mode=lrc_align_mode,
++            edit_start_sec=edit_start_sec,
++            edit_end_sec=edit_end_sec,
++            edit_mask_start_offset_sec=edit_mask_start_offset_sec,
++            edit_mask_end_offset_sec=edit_mask_end_offset_sec,
+         )
++        audio_cond = full_audio_latent if audio_cond_mask is not None else ref_latent
++        prompt_lens = None
++        if audio_cond_mask is not None:
++            prompt_lens = torch.tensor([ref_latent_len], device=self.device, dtype=torch.long)
+ 
+         assert midi_p is not None and bound_p is not None
+         with torch.inference_mode():
+             generated_latent, _ = self.model.sample(
+-                cond=ref_latent,
++                cond=audio_cond,
+                 midi_in=midi_in,
+                 text=text_tokens,
+                 duration=total_len,
++                lens=prompt_lens,
+                 steps=nfe_step,
+                 cfg_strength=cfg_strength,
+                 sway_sampling_coef=None,
+@@ -225,10 +302,29 @@ class YingMusicSinger(nn.Module, PyTorchModelHubMixin):
+                 midi_p=midi_p,
+                 t_shift=t_shift,
+                 bound_p=bound_p,
++                audio_cond_mask=audio_cond_mask,
++                midi_prompt_mask=midi_prompt_mask,
+                 guidance_scale=cfg_strength,
+             )
+         generated_latent = generated_latent.to(torch.float32)
+-        generated_latent = generated_latent[:, ref_latent_len: -int(self.vae_frame_rate*self.rear_silent_time), :]
++        if audio_cond_mask is not None:
++            replace_len = min(
++                generated_latent.shape[1],
++                full_audio_latent.shape[1],
++                audio_cond_mask.shape[1],
++            )
++            replace_mask = audio_cond_mask[:, :replace_len].unsqueeze(-1)
++            source_latent = full_audio_latent[:, :replace_len, :].to(
++                dtype=generated_latent.dtype, device=generated_latent.device
++            )
++            generated_latent[:, :replace_len, :] = torch.where(
++                replace_mask,
++                source_latent,
++                generated_latent[:, :replace_len, :],
++            )
++        generated_latent = generated_latent[
++            :, ref_latent_len : -int(self.vae_frame_rate * self.rear_silent_time), :
++        ]
+         generated_latent = generated_latent.permute(0, 2, 1)  # [B, D, T]
+ 
+         generated_audio = self.vae.decode_audio(generated_latent)
+diff --git a/src/YingMusicSinger/models/model.py b/src/YingMusicSinger/models/model.py
+index 6b5c0e8..1068ba7 100644
+--- a/src/YingMusicSinger/models/model.py
++++ b/src/YingMusicSinger/models/model.py
+@@ -197,6 +197,8 @@ class Singer(nn.Module):
+         t_shift=1.0,  # Sampling timestep shift (ZipVoice-style)
+         guidance_scale=None,
+         edit_mask=None,
++        audio_cond_mask=None,
++        midi_prompt_mask=None,
+         midi_p=None,
+         bound_p=None,
+         enable_melody_control=True,
+@@ -265,10 +267,22 @@ class Singer(nn.Module):
+ 
+         assert isinstance(text, torch.Tensor)
+ 
+-        cond_mask = lens_to_mask(lens)
++        prompt_cond_mask = lens_to_mask(lens)
+ 
+         if edit_mask is not None:
+-            cond_mask = cond_mask & edit_mask
++            prompt_cond_mask = prompt_cond_mask & edit_mask
++
++        if audio_cond_mask is None:
++            audio_cond_mask = prompt_cond_mask
++        else:
++            audio_cond_mask = audio_cond_mask.to(device=device, dtype=torch.bool)
++            assert audio_cond_mask.shape[0] == batch, "audio_cond_mask batch mismatch"
++
++        if midi_prompt_mask is None:
++            midi_prompt_mask = prompt_cond_mask
++        else:
++            midi_prompt_mask = midi_prompt_mask.to(device=device, dtype=torch.bool)
++            assert midi_prompt_mask.shape[0] == batch, "midi_prompt_mask batch mismatch"
+ 
+         if isinstance(duration, int):
+             duration = torch.full((batch,), duration, device=device, dtype=torch.long)
+@@ -293,17 +307,26 @@ class Singer(nn.Module):
+         if no_ref_audio:
+             cond = torch.zeros_like(cond)
+ 
+-        cond_mask = F.pad(
+-            cond_mask, (0, max_duration - cond_mask.shape[-1]), value=False
++        if audio_cond_mask.shape[-1] > max_duration:
++            audio_cond_mask = audio_cond_mask[:, :max_duration]
++        if midi_prompt_mask.shape[-1] > max_duration:
++            midi_prompt_mask = midi_prompt_mask[:, :max_duration]
++
++        audio_cond_mask = F.pad(
++            audio_cond_mask, (0, max_duration - audio_cond_mask.shape[-1]), value=False
++        )
++        midi_prompt_mask = F.pad(
++            midi_prompt_mask, (0, max_duration - midi_prompt_mask.shape[-1]), value=False
+         )
+-        cond_mask = cond_mask.unsqueeze(-1)
+-        step_cond = torch.where(cond_mask, cond, torch.zeros_like(cond))
++        audio_cond_mask = audio_cond_mask.unsqueeze(-1)
++        midi_prompt_mask = midi_prompt_mask.unsqueeze(-1)
++        step_cond = torch.where(audio_cond_mask, cond, torch.zeros_like(cond))
+ 
+         assert max_duration == midi.shape[1]
+ 
+-        # Zero out melody in prompt region; optionally disable melody control entirely
++        # Zero out melody only in the prompt region; edit mode can keep target melody while masking target audio.
+         if enable_melody_control:
+-            midi = torch.where(cond_mask, torch.zeros_like(midi), midi)
++            midi = torch.where(midi_prompt_mask, torch.zeros_like(midi), midi)
+         else:
+             midi = torch.zeros_like(midi)
+ 
+-- 
+2.34.1
+

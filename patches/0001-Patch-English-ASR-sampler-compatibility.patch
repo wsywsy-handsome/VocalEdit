@@ -1,0 +1,50 @@
+From 840f5bdd8f4d7e3f78b7eb9bdc5bf51afff1f954 Mon Sep 17 00:00:00 2001
+From: VocalEdit <vocaledit@example.com>
+Date: Tue, 7 Jul 2026 00:37:56 +0000
+Subject: [PATCH] Patch English ASR sampler compatibility
+
+---
+ preprocess/tools/lyric_transcription.py | 20 ++++++++++++++++++++
+ 1 file changed, 20 insertions(+)
+
+diff --git a/preprocess/tools/lyric_transcription.py b/preprocess/tools/lyric_transcription.py
+index 7843564..737b7cd 100644
+--- a/preprocess/tools/lyric_transcription.py
++++ b/preprocess/tools/lyric_transcription.py
+@@ -132,6 +132,25 @@ class _ASRZhModel:
+ class _ASREnModel:
+     """English ASR wrapper for NeMo Parakeet-TDT."""
+ 
++    @staticmethod
++    def _patch_torch_sampler_compat() -> None:
++        """Allow older Lhotse releases to run on newer PyTorch Sampler APIs."""
++        try:
++            from torch.utils.data import Sampler
++        except Exception:
++            return
++
++        try:
++            Sampler(data_source=None)
++            return
++        except TypeError:
++            pass
++
++        def _init(self, data_source=None):  # noqa: ARG001
++            return None
++
++        Sampler.__init__ = _init
++
+     def __init__(self, model_path: str, device: str):
+         try:
+             import nemo.collections.asr as nemo_asr  # type: ignore
+@@ -160,6 +179,7 @@ class _ASREnModel:
+         return word_ts if isinstance(word_ts, list) else []
+ 
+     def process(self, wav_fn: str) -> Tuple[List[str], List[float]]:
++        self._patch_torch_sampler_compat()
+         outputs = self.model.transcribe(
+             [wav_fn],
+             timestamps=True,
+-- 
+2.34.1
+
