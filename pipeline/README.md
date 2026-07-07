@@ -346,6 +346,36 @@ pipeline/runs/yingmusic_lyric_edit_gtsinger_mini_40_chinese_hardmask/logs/<task_
 | `--verbose` | 失败时写完整 traceback 到 log | 不开启 |
 | `--no-conda-reexec` | 禁止脚本自动重进 Conda 环境 | 不开启 |
 
+
+## SoulX-Singer 对照实验
+
+如果要直接用 SoulX-Singer 自身做整段重合成对照，可以使用：
+
+```bash
+conda run -n align python pipeline/scripts/run_soulx_lyric_edit_tasks.py \
+  --task-manifest pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_100_chinese.jsonl \
+  --soulx-root SoulX-Singer \
+  --output-dir pipeline/runs/soulx_lyric_edit_gtsinger_mini_100_chinese \
+  --control melody \
+  --device cuda \
+  --fp16 \
+  --overwrite
+```
+
+该脚本会把每条歌词修改 task 转成 SoulX target metadata：保留原 metadata 的 `time/duration/note_pitch/note_type/f0`，只改写 `text/phoneme`。`note_type=3` 会跟随前一个歌词字同步改写。
+
+只生成 metadata、不跑模型时：
+
+```bash
+conda run -n align python pipeline/scripts/run_soulx_lyric_edit_tasks.py \
+  --limit 1 \
+  --prepare-only \
+  --output-dir pipeline/runs/soulx_lyric_edit_prepare_smoke \
+  --overwrite
+```
+
+注意：SoulX-Singer 对照会重新生成整段 target 音频；它不会像 YingMusic infilling 那样回填未编辑区域的原始 latent。
+
 ## 步骤 5：检查推理结果
 
 统计成功数：
