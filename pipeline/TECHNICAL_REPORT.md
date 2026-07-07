@@ -61,11 +61,7 @@ lyric edit task manifest
 
 **图 1 建议：Pipeline 总览架构图**
 
-ChatGPT 生图 prompt：
-
-```text
-请生成一张中文技术架构图，主题是“VocalEdit 歌声歌词局部编辑 Pipeline”。画面从左到右展示数据流：GTSinger 数据集 -> 抽样与过滤 Paired_Speech_Group -> SoulX-Singer 预处理（ASR 转写、字级对齐、metadata.json）-> LLM 生成歌词修改任务（原歌词、修改歌词、修改词时间戳）-> YingMusic-Singer-Plus 局部推理（音频 prompt mask、melody 条件、歌词条件）-> 生成 wav -> Streamlit DAW 可视化。使用干净的技术文档风格，白底，蓝绿灰配色，模块框和箭头清晰，所有文字为中文。
-```
+![VocalEdit pipeline 总览架构图](assets/pipeline-overview.png)
 
 ## 数据阶段
 
@@ -295,15 +291,10 @@ midi_prompt_mask=None
 - `audio_cond_mask` 控制哪些音频 latent 作为条件、哪些由模型生成。
 - `midi_prompt_mask` 控制 melody 条件中哪些位置视为 prompt 区域。
 
-建议为这部分画一张原理图。
 
-**图 2 建议：局部 latent infilling 原理图**
+**局部 latent infilling 原理图**
 
-ChatGPT 生图 prompt：
-
-```text
-请生成一张中文技术原理图，主题是“YingMusic 局部歌词编辑的音频 latent infilling”。画面展示一条时间轴，上半部分是音频 latent：左侧 ref_latent 作为音色 prompt，右侧 melody_latent 作为原始旋律音频；在右侧 melody_latent 中间有一段红色 mask 区域，mask 起点和终点可由 offset 向外扩张。下半部分展示模型生成后的 generated_latent：mask 区域保留生成结果，mask 外区域用原始 melody_latent 回填。旁边标注 audio_cond_mask=True 表示保留原始 latent，False 表示生成。风格为技术论文插图，白底，清晰箭头和中文标签。
-```
+![YingMusic 局部 latent infilling 原理图](assets/latent-infilling.png)
 
 ## 批量推理阶段
 
@@ -380,11 +371,6 @@ conda run -n ymsp streamlit run pipeline/scripts/view_lyric_edit_tasks.py \
 
 **图 3 建议：Streamlit DAW 可视化界面示意图**
 
-ChatGPT 生图 prompt：
-
-```text
-请生成一张中文 UI 示意图，主题是“VocalEdit Streamlit 可视化界面”。界面包含左侧 sidebar，可选择 task id 和 manifest 路径；主区域顶部显示原歌词和修改后歌词，修改词高亮；中间是类 DAW 双音轨视图，两条水平 waveform 分别标注 Original 和 Edited，红色竖线播放头穿过两条音轨，橙色半透明区域标注编辑区间；上方有 Original/Edited 选择按钮和 Play 按钮；下方显示原音频和修改音频路径。风格简洁、专业、白底、蓝绿灰配色。
-```
 
 ## 关键文件索引
 
