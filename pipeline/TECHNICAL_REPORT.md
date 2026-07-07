@@ -345,14 +345,14 @@ pipeline/runs/<run_name>/
 
 [pipeline/scripts/view_lyric_edit_tasks.py](scripts/view_lyric_edit_tasks.py)
 
-该应用读取 task manifest 和 inference result manifest，逐条展示编辑任务。
+该应用读取 task manifest、YingMusic inference result manifest 和 SoulX baseline result manifest，逐条展示编辑任务。
 
 主要功能：
 
 - 显示原歌词、修改歌词，并高亮修改词。
 - 显示修改词、替换词、起止时间。
-- 类 DAW 双音轨视图：Original / Edited。
-- 红色竖线播放头穿过两条波形。
+- 类 DAW 三音轨视图：Original / YingMusic / SoulX。
+- 红色竖线播放头穿过三条波形。
 - 空格键播放/暂停。
 - 点击或拖动波形区域移动播放头。
 - 点击音轨或按钮选择当前播放音轨。

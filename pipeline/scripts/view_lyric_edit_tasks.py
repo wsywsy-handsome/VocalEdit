@@ -16,10 +16,13 @@ import streamlit.components.v1 as components
 
 
 DEFAULT_TASK_MANIFEST = Path(
-    "pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_40_chinese.jsonl"
+    "pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_100_chinese.jsonl"
 )
 DEFAULT_RESULT_MANIFEST = Path(
-    "pipeline/runs/yingmusic_lyric_edit_gtsinger_mini_40_chinese_hardmask/inference_results.jsonl"
+    "pipeline/runs/yingmusic_lyric_edit_gtsinger_mini_100_chinese_hardmask_with_offset/inference_results.jsonl"
+)
+DEFAULT_SOULX_RESULT_MANIFEST = Path(
+    "pipeline/runs/soulx_lyric_edit_gtsinger_mini_100_chinese/inference_results.jsonl"
 )
 
 
@@ -106,16 +109,24 @@ def load_waveform(path_text: str, max_points: int = 1400) -> dict[str, Any]:
 
 
 def merge_tasks(
-    tasks: list[dict[str, Any]], results: list[dict[str, Any]]
+    tasks: list[dict[str, Any]],
+    yingmusic_results: list[dict[str, Any]],
+    soulx_results: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    result_by_id = {row.get("id"): row for row in results}
+    yingmusic_by_id = {row.get("id"): row for row in yingmusic_results}
+    soulx_by_id = {row.get("id"): row for row in soulx_results}
     merged = []
     for task in tasks:
+        task_id = task.get("id")
         row = dict(task)
-        result = result_by_id.get(task.get("id"), {})
-        row["result"] = result
-        row["output_path"] = result.get("output_path")
-        row["result_status"] = result.get("status", "missing")
+        yingmusic_result = yingmusic_by_id.get(task_id, {})
+        soulx_result = soulx_by_id.get(task_id, {})
+        row["yingmusic_result"] = yingmusic_result
+        row["yingmusic_output_path"] = yingmusic_result.get("output_path")
+        row["yingmusic_status"] = yingmusic_result.get("status", "missing")
+        row["soulx_result"] = soulx_result
+        row["soulx_output_path"] = soulx_result.get("output_path")
+        row["soulx_status"] = soulx_result.get("status", "missing")
         merged.append(row)
     return merged
 
@@ -160,28 +171,31 @@ def audio_data_uri(path: Path | None) -> str:
 
 def render_daw(
     original: dict[str, Any],
-    edited: dict[str, Any] | None,
+    yingmusic: dict[str, Any] | None,
+    soulx: dict[str, Any] | None,
     edit_start: float,
     edit_end: float,
     task_id: str,
     original_audio_uri: str,
-    edited_audio_uri: str,
+    yingmusic_audio_uri: str,
+    soulx_audio_uri: str,
 ) -> str:
     width = 1180
-    left = 92
+    left = 104
     right = 22
     top = 40
-    track_h = 86
-    gap = 18
+    track_h = 78
+    gap = 14
     bottom = 34
     inner_w = width - left - right
     total_duration = max(
         float(original.get("duration") or 0.0),
-        float((edited or {}).get("duration") or 0.0),
+        float((yingmusic or {}).get("duration") or 0.0),
+        float((soulx or {}).get("duration") or 0.0),
         float(edit_end or 0.0),
         0.1,
     )
-    height = top + track_h * 2 + gap + bottom
+    height = top + track_h * 3 + gap * 2 + bottom
 
     def x_for_time(t: float) -> float:
         t = max(0.0, min(float(t), total_duration))
@@ -202,24 +216,32 @@ def render_daw(
             f'<text x="{x:.2f}" y="18" text-anchor="middle" class="time-label">{t:.1f}s</text>'
         )
 
+    y_original = top
+    y_yingmusic = top + track_h + gap
+    y_soulx = top + (track_h + gap) * 2
+    region_h = track_h * 3 + gap * 2
+
     orig_path = waveform_polyline(
-        original["peaks"], left, top + track_h / 2, inner_w, track_h * 0.36
+        original["peaks"], left, y_original + track_h / 2, inner_w, track_h * 0.36
     )
-    edit_path = ""
-    if edited:
-        edit_path = waveform_polyline(
-            edited["peaks"],
-            left,
-            top + track_h + gap + track_h / 2,
-            inner_w,
-            track_h * 0.36,
+    yingmusic_path = ""
+    if yingmusic:
+        yingmusic_path = waveform_polyline(
+            yingmusic["peaks"], left, y_yingmusic + track_h / 2, inner_w, track_h * 0.36
+        )
+    soulx_path = ""
+    if soulx:
+        soulx_path = waveform_polyline(
+            soulx["peaks"], left, y_soulx + track_h / 2, inner_w, track_h * 0.36
         )
 
     escaped_id = html.escape(task_id)
     edit_text = html.escape(f"edit {edit_start:.2f}s - {edit_end:.2f}s")
     original_audio_uri = html.escape(original_audio_uri, quote=True)
-    edited_audio_uri = html.escape(edited_audio_uri, quote=True)
-    has_edited = "true" if edited_audio_uri else "false"
+    yingmusic_audio_uri = html.escape(yingmusic_audio_uri, quote=True)
+    soulx_audio_uri = html.escape(soulx_audio_uri, quote=True)
+    has_yingmusic = "true" if yingmusic_audio_uri else "false"
+    has_soulx = "true" if soulx_audio_uri else "false"
 
     return f"""
 <style>
@@ -266,13 +288,15 @@ def render_daw(
 </style>
 <div class="daw-wrap" id="dawRoot" tabindex="0">
   <audio id="originalAudio" src="{original_audio_uri}" preload="auto"></audio>
-  <audio id="editedAudio" src="{edited_audio_uri}" preload="auto"></audio>
+  <audio id="yingmusicAudio" src="{yingmusic_audio_uri}" preload="auto"></audio>
+  <audio id="soulxAudio" src="{soulx_audio_uri}" preload="auto"></audio>
   <div class="daw-head">
     <div><strong>{escaped_id}</strong></div>
     <div class="transport">
       <button id="playBtn" type="button">Play</button>
       <button id="origBtn" type="button" class="active">Original</button>
-      <button id="editBtn" type="button">Edited</button>
+      <button id="yingBtn" type="button">YingMusic</button>
+      <button id="soulxBtn" type="button">SoulX</button>
       <span class="time-readout"><span id="timeNow">0.00</span>s / {total_duration:.2f}s</span>
     </div>
   </div>
@@ -280,15 +304,18 @@ def render_daw(
     <svg id="dawSvg" viewBox="0 0 {width} {height}" width="100%" height="{height}" role="img" aria-label="waveform tracks">
       <rect x="0" y="0" width="{width}" height="{height}" fill="#ffffff" />
       {''.join(tick_svg)}
-      <rect id="origTrack" class="track-bg selected" data-track="original" x="{left}" y="{top}" width="{inner_w}" height="{track_h}" rx="2" fill="#eff6ff" stroke="#2563eb" />
-      <rect id="editTrack" class="track-bg" data-track="edited" x="{left}" y="{top + track_h + gap}" width="{inner_w}" height="{track_h}" rx="2" fill="#fbfdff" stroke="#d9e0ea" />
-      <rect x="{edit_x:.2f}" y="{top}" width="{edit_w:.2f}" height="{track_h * 2 + gap}" fill="#f97316" opacity="0.18" pointer-events="none" />
-      <text x="16" y="{top + track_h / 2 + 4:.2f}" class="track-label">Original</text>
-      <text x="16" y="{top + track_h + gap + track_h / 2 + 4:.2f}" class="track-label">Edited</text>
+      <rect id="origTrack" class="track-bg selected" data-track="original" x="{left}" y="{y_original}" width="{inner_w}" height="{track_h}" rx="2" fill="#eff6ff" stroke="#2563eb" />
+      <rect id="yingTrack" class="track-bg" data-track="yingmusic" x="{left}" y="{y_yingmusic}" width="{inner_w}" height="{track_h}" rx="2" fill="#fbfdff" stroke="#d9e0ea" />
+      <rect id="soulxTrack" class="track-bg" data-track="soulx" x="{left}" y="{y_soulx}" width="{inner_w}" height="{track_h}" rx="2" fill="#fbfdff" stroke="#d9e0ea" />
+      <rect x="{edit_x:.2f}" y="{top}" width="{edit_w:.2f}" height="{region_h}" fill="#f97316" opacity="0.18" pointer-events="none" />
+      <text x="16" y="{y_original + track_h / 2 + 4:.2f}" class="track-label">Original</text>
+      <text x="16" y="{y_yingmusic + track_h / 2 + 4:.2f}" class="track-label">YingMusic</text>
+      <text x="16" y="{y_soulx + track_h / 2 + 4:.2f}" class="track-label">SoulX</text>
       <path d="{orig_path}" class="wave" fill="#2563eb" opacity="0.72" />
-      <path d="{edit_path}" class="wave" fill="#16a34a" opacity="0.72" />
-      <line x1="{edit_x:.2f}" y1="{top}" x2="{edit_x:.2f}" y2="{top + track_h * 2 + gap}" stroke="#ea580c" stroke-width="2" pointer-events="none" />
-      <line x1="{edit_x + edit_w:.2f}" y1="{top}" x2="{edit_x + edit_w:.2f}" y2="{top + track_h * 2 + gap}" stroke="#ea580c" stroke-width="2" pointer-events="none" />
+      <path d="{yingmusic_path}" class="wave" fill="#16a34a" opacity="0.72" />
+      <path d="{soulx_path}" class="wave" fill="#7c3aed" opacity="0.72" />
+      <line x1="{edit_x:.2f}" y1="{top}" x2="{edit_x:.2f}" y2="{top + region_h}" stroke="#ea580c" stroke-width="2" pointer-events="none" />
+      <line x1="{edit_x + edit_w:.2f}" y1="{top}" x2="{edit_x + edit_w:.2f}" y2="{top + region_h}" stroke="#ea580c" stroke-width="2" pointer-events="none" />
       <text x="{edit_x + 6:.2f}" y="{top + 16}" class="region-label">{edit_text}</text>
       <g id="playhead" class="playhead" transform="translate({left},0)">
         <line x1="0" y1="24" x2="0" y2="{height - 8}" stroke="#dc2626" stroke-width="2.5" />
@@ -304,25 +331,40 @@ def render_daw(
   const root = document.getElementById('dawRoot');
   const svg = document.getElementById('dawSvg');
   const playhead = document.getElementById('playhead');
-  const originalAudio = document.getElementById('originalAudio');
-  const editedAudio = document.getElementById('editedAudio');
-  const origBtn = document.getElementById('origBtn');
-  const editBtn = document.getElementById('editBtn');
+  const audios = {{
+    original: document.getElementById('originalAudio'),
+    yingmusic: document.getElementById('yingmusicAudio'),
+    soulx: document.getElementById('soulxAudio'),
+  }};
+  const buttons = {{
+    original: document.getElementById('origBtn'),
+    yingmusic: document.getElementById('yingBtn'),
+    soulx: document.getElementById('soulxBtn'),
+  }};
+  const tracks = {{
+    original: document.getElementById('origTrack'),
+    yingmusic: document.getElementById('yingTrack'),
+    soulx: document.getElementById('soulxTrack'),
+  }};
+  const available = {{ original: true, yingmusic: {has_yingmusic}, soulx: {has_soulx} }};
   const playBtn = document.getElementById('playBtn');
   const timeNow = document.getElementById('timeNow');
-  const origTrack = document.getElementById('origTrack');
-  const editTrack = document.getElementById('editTrack');
   const left = {left};
   const innerW = {inner_w};
   const totalDuration = {total_duration:.8f};
-  const hasEdited = {has_edited};
   let selected = 'original';
   let dragging = false;
 
-  if (!hasEdited) editBtn.disabled = true;
+  for (const [track, button] of Object.entries(buttons)) {{
+    if (!available[track]) button.disabled = true;
+  }}
 
-  function audioFor(track) {{ return track === 'edited' ? editedAudio : originalAudio; }}
-  function otherAudio(track) {{ return track === 'edited' ? originalAudio : editedAudio; }}
+  function audioFor(track) {{ return audios[track] || audios.original; }}
+  function pauseOtherAudios(track) {{
+    for (const [name, audio] of Object.entries(audios)) {{
+      if (name !== track) audio.pause();
+    }}
+  }}
   function clampTime(t) {{ return Math.max(0, Math.min(totalDuration, t)); }}
   function xForTime(t) {{ return left + innerW * clampTime(t) / totalDuration; }}
   function timeForClientX(clientX) {{
@@ -338,25 +380,24 @@ def render_daw(
     timeNow.textContent = time.toFixed(2);
   }}
   function setSelected(track) {{
-    if (track === 'edited' && !hasEdited) return;
+    if (!available[track]) return;
     const previous = audioFor(selected);
     selected = track;
-    otherAudio(selected).pause();
-    origBtn.classList.toggle('active', selected === 'original');
-    editBtn.classList.toggle('active', selected === 'edited');
-    origTrack.classList.toggle('selected', selected === 'original');
-    editTrack.classList.toggle('selected', selected === 'edited');
-    origTrack.setAttribute('fill', selected === 'original' ? '#eff6ff' : '#fbfdff');
-    editTrack.setAttribute('fill', selected === 'edited' ? '#eff6ff' : '#fbfdff');
+    pauseOtherAudios(selected);
+    for (const name of Object.keys(buttons)) {{
+      buttons[name].classList.toggle('active', selected === name);
+      tracks[name].classList.toggle('selected', selected === name);
+      tracks[name].setAttribute('fill', selected === name ? '#eff6ff' : '#fbfdff');
+    }}
     const current = audioFor(selected);
-    current.currentTime = clampTime(previous.currentTime || 0);
+    current.currentTime = Math.min(clampTime(previous.currentTime || 0), current.duration || totalDuration);
     setPlayhead(current.currentTime);
     updatePlayButton();
   }}
   function updatePlayButton() {{ playBtn.textContent = audioFor(selected).paused ? 'Play' : 'Pause'; }}
   async function togglePlay() {{
     const audio = audioFor(selected);
-    otherAudio(selected).pause();
+    pauseOtherAudios(selected);
     if (audio.paused) {{
       if (audio.currentTime >= Math.min(audio.duration || totalDuration, totalDuration) - 0.02) audio.currentTime = 0;
       try {{ await audio.play(); }} catch (err) {{ console.warn(err); }}
@@ -367,8 +408,9 @@ def render_daw(
   }}
   function seekTo(t) {{
     const time = clampTime(t);
-    originalAudio.currentTime = Math.min(time, originalAudio.duration || time);
-    if (hasEdited) editedAudio.currentTime = Math.min(time, editedAudio.duration || time);
+    for (const audio of Object.values(audios)) {{
+      audio.currentTime = Math.min(time, audio.duration || time);
+    }}
     setPlayhead(time);
   }}
   function onPointerSeek(event) {{
@@ -381,10 +423,12 @@ def render_daw(
     requestAnimationFrame(animationLoop);
   }}
 
-  origBtn.addEventListener('click', () => setSelected('original'));
-  editBtn.addEventListener('click', () => setSelected('edited'));
-  origTrack.addEventListener('click', (event) => {{ setSelected('original'); onPointerSeek(event); }});
-  editTrack.addEventListener('click', (event) => {{ setSelected('edited'); onPointerSeek(event); }});
+  buttons.original.addEventListener('click', () => setSelected('original'));
+  buttons.yingmusic.addEventListener('click', () => setSelected('yingmusic'));
+  buttons.soulx.addEventListener('click', () => setSelected('soulx'));
+  tracks.original.addEventListener('click', (event) => {{ setSelected('original'); onPointerSeek(event); }});
+  tracks.yingmusic.addEventListener('click', (event) => {{ setSelected('yingmusic'); onPointerSeek(event); }});
+  tracks.soulx.addEventListener('click', (event) => {{ setSelected('soulx'); onPointerSeek(event); }});
   playBtn.addEventListener('click', togglePlay);
   svg.addEventListener('pointerdown', (event) => {{
     dragging = true;
@@ -407,7 +451,7 @@ def render_daw(
       togglePlay();
     }}
   }});
-  [originalAudio, editedAudio].forEach((audio) => {{
+  Object.values(audios).forEach((audio) => {{
     audio.addEventListener('pause', updatePlayButton);
     audio.addEventListener('play', updatePlayButton);
     audio.addEventListener('ended', updatePlayButton);
@@ -435,18 +479,22 @@ def main() -> None:
     with st.sidebar:
         st.header("Data")
         task_manifest = st.text_input("Task manifest", str(DEFAULT_TASK_MANIFEST))
-        result_manifest = st.text_input("Result manifest", str(DEFAULT_RESULT_MANIFEST))
+        result_manifest = st.text_input("YingMusic result manifest", str(DEFAULT_RESULT_MANIFEST))
+        soulx_result_manifest = st.text_input(
+            "SoulX result manifest", str(DEFAULT_SOULX_RESULT_MANIFEST)
+        )
         st.divider()
         st.header("Task")
 
     try:
         tasks = load_jsonl(task_manifest)
-        results = load_jsonl(result_manifest)
+        yingmusic_results = load_jsonl(result_manifest)
+        soulx_results = load_jsonl(soulx_result_manifest)
     except Exception as exc:
         st.error(f"Failed to load manifests: {exc}")
         return
 
-    rows = merge_tasks(tasks, results)
+    rows = merge_tasks(tasks, yingmusic_results, soulx_results)
     if not rows:
         st.warning("No tasks found.")
         return
@@ -459,7 +507,8 @@ def main() -> None:
 
     row = rows[index]
     original_path = existing_path(row.get("audio_path"))
-    edited_path = existing_path(row.get("output_path"))
+    yingmusic_path = existing_path(row.get("yingmusic_output_path"))
+    soulx_path = existing_path(row.get("soulx_output_path"))
     edit_start = float(row.get("edit_start_sec", 0.0))
     edit_end = float(row.get("edit_end_sec", edit_start))
 
@@ -468,10 +517,12 @@ def main() -> None:
         return
 
     original_wave = load_waveform(str(original_path))
-    edited_wave = load_waveform(str(edited_path)) if edited_path else None
+    yingmusic_wave = load_waveform(str(yingmusic_path)) if yingmusic_path else None
+    soulx_wave = load_waveform(str(soulx_path)) if soulx_path else None
     total_duration = max(
         float(original_wave.get("duration") or 0.0),
-        float((edited_wave or {}).get("duration") or 0.0),
+        float((yingmusic_wave or {}).get("duration") or 0.0),
+        float((soulx_wave or {}).get("duration") or 0.0),
         edit_end,
         0.1,
     )
@@ -504,22 +555,26 @@ def main() -> None:
     components.html(
         render_daw(
             original_wave,
-            edited_wave,
+            yingmusic_wave,
+            soulx_wave,
             edit_start,
             edit_end,
             row["id"],
             audio_data_uri(original_path),
-            audio_data_uri(edited_path),
+            audio_data_uri(yingmusic_path),
+            audio_data_uri(soulx_path),
         ),
-        height=330,
+        height=420,
         scrolling=False,
     )
 
-    path_cols = st.columns(2)
+    path_cols = st.columns(3)
     path_cols[0].caption("原音频")
     path_cols[0].code(str(original_path), language=None)
-    path_cols[1].caption("修改音频")
-    path_cols[1].code(str(edited_path) if edited_path else "音频文件不存在", language=None)
+    path_cols[1].caption("YingMusic 修改音频")
+    path_cols[1].code(str(yingmusic_path) if yingmusic_path else "音频文件不存在", language=None)
+    path_cols[2].caption("SoulX 对照音频")
+    path_cols[2].code(str(soulx_path) if soulx_path else "音频文件不存在", language=None)
 
     with st.expander("Task JSON"):
         st.json(row, expanded=False)
