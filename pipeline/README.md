@@ -114,7 +114,7 @@ data/gtsinger_mini_40/summary.json
 pipeline/scripts/run_soulx_alignment_batch.py
 ```
 
-用途：递归读取 `--audio-root` 下的 wav，逐条调用 SoulX-Singer 的 `preprocess.pipeline`，得到 ASR 歌词、音符/字级时间、F0、切片等预处理结果。
+用途：递归读取 `--audio-root` 下的音频文件，逐条调用 SoulX-Singer 的 `preprocess.pipeline`，得到 ASR 歌词、音符/字级时间、F0、切片等预处理结果。默认扫描 `.wav/.flac/.mp3/.m4a/.ogg`。
 
 示例命令：
 
@@ -126,16 +126,17 @@ python pipeline/scripts/run_soulx_alignment_batch.py \
   --conda-env align \
   --language Mandarin \
   --device cuda \
-  --max-merge-duration 30000
+  --max-merge-duration 30000 \
+  --extensions .wav .flac .mp3 .m4a .ogg
 ```
 
 输出：
 
 ```text
 pipeline/runs/soulx_align_gtsinger_mini_40_chinese/alignment_results.jsonl
-pipeline/runs/soulx_align_gtsinger_mini_40_chinese/items/<task_id>/metadata.json
-pipeline/runs/soulx_align_gtsinger_mini_40_chinese/items/<task_id>/vocal.wav
-pipeline/runs/soulx_align_gtsinger_mini_40_chinese/logs/<task_id>.log
+pipeline/runs/soulx_align_gtsinger_mini_40_chinese/items/<item_id>/metadata.json
+pipeline/runs/soulx_align_gtsinger_mini_40_chinese/items/<item_id>/vocal.wav
+pipeline/runs/soulx_align_gtsinger_mini_40_chinese/logs/<item_id>.log
 ```
 
 `alignment_results.jsonl` 每行包含：
@@ -144,6 +145,8 @@ pipeline/runs/soulx_align_gtsinger_mini_40_chinese/logs/<task_id>.log
 {
   "id": "chinese_001_xxx",
   "audio_path": ".../chinese_001_xxx.wav",
+  "relative_path": "chinese_001_xxx.wav",
+  "extension": ".wav",
   "metadata_path": ".../metadata.json",
   "log_path": ".../logs/chinese_001_xxx.log",
   "status": "success"
@@ -161,13 +164,16 @@ cp pipeline/runs/soulx_align_gtsinger_mini_40_chinese/alignment_results.jsonl \
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| `--audio-root` | 待对齐 wav 根目录 | 必填 |
+| `--audio-root` | 待对齐音频根目录 | 必填 |
 | `--soulx-root` | SoulX-Singer 项目根目录 | 必填 |
 | `--output-root` | 对齐结果输出目录 | 必填 |
 | `--conda-env` | SoulX 对齐环境 | `align` |
 | `--language` | SoulX 语言参数，中文用 `Mandarin` | `Mandarin` |
 | `--device` | 推理设备 | `cuda` |
 | `--max-merge-duration` | SoulX 最大合并时长参数，单位按 SoulX 脚本定义 | `30000` |
+| `--extensions` | 要扫描的音频扩展名 | `.wav .flac .mp3 .m4a .ogg` |
+| `--include-hidden` | 包含隐藏文件和隐藏目录 | 不开启 |
+| `--follow-symlinks` | 递归扫描符号链接目录 | 不开启 |
 | `--resume` | 跳过已经成功的条目，继续未完成任务 | 不开启 |
 
 注意：SoulX 的 `metadata.json` 中 `note_type` 有三类：
@@ -515,11 +521,11 @@ python pipeline/scripts/discover_audio.py \
 | --- | --- | --- |
 | `--dataset-root` | 要递归扫描的数据集根目录，例如 `../music_example` | 必填 |
 | `--output` | 输出 JSONL manifest；建议用 `data/<dataset_name>/manifest.jsonl` 或 `pipeline/manifests/00_discovered.<dataset_name>.jsonl` | 必填 |
-| `--extensions` | 要包含的音频扩展名；如果下一步直接跑当前 SoulX 对齐脚本，建议先只用 `.wav` | `.wav .flac .mp3 .m4a .ogg` |
+| `--extensions` | 要包含的音频扩展名；建议和后续 SoulX 对齐脚本的 `--extensions` 保持一致 | `.wav .flac .mp3 .m4a .ogg` |
 | `--include-hidden` | 包含隐藏文件和隐藏目录 | 不开启 |
 | `--follow-symlinks` | 递归扫描符号链接目录 | 不开启 |
 
-和后续 SoulX 对齐衔接时需要注意：当前 `run_soulx_alignment_batch.py` 仍然从 `--audio-root` 递归查找 `*.wav`，没有直接读取 `00_discovered` manifest。因此用 `../music_example` 构建清单后，对齐命令应使用同一个音频根目录：
+和后续 SoulX 对齐衔接时需要注意：当前 `run_soulx_alignment_batch.py` 仍然从 `--audio-root` 递归扫描音频文件，没有直接读取 `00_discovered` manifest。因此用 `../music_example` 构建清单后，对齐命令应使用同一个音频根目录，并让 `--extensions` 与扫描阶段保持一致：
 
 ```bash
 conda run -n align python pipeline/scripts/run_soulx_alignment_batch.py \
@@ -529,6 +535,7 @@ conda run -n align python pipeline/scripts/run_soulx_alignment_batch.py \
   --conda-env align \
   --language Mandarin \
   --device cuda \
+  --extensions .wav .flac .mp3 .m4a .ogg \
   --resume
 ```
 
