@@ -459,22 +459,51 @@ pipeline/runs/yingmusic_lyric_edit_gtsinger_mini_40_chinese_hardmask/inference_r
 pipeline/scripts/discover_audio.py
 ```
 
-用途：递归扫描任意数据集目录，生成音频清单。这个脚本适合扩展到非 GTSinger 数据集时使用。
+用途：递归扫描任意数据集目录，生成音频清单。这个脚本适合处理非 GTSinger 格式的数据，例如 `../music_example`。
 
-示例命令：
+它的输出是 JSONL manifest，每一行对应一条音频。这个 manifest 和 `create_gtsinger_mini_dataset.py` 生成的 `manifest.jsonl` 在后续 pipeline 里使用同一类核心字段：
+
+| 字段 | 含义 | 和 GTSinger mini manifest 的关系 |
+| --- | --- | --- |
+| `id` | 稳定样本 ID，由相对路径 hash 得到 | 对应 GTSinger manifest 的 `id` |
+| `audio_path` | 音频绝对路径 | 后续 SoulX 对齐主要依赖这个字段语义 |
+| `relative_path` | 相对 `--dataset-root` 的路径 | 对应输出数据集内相对路径 |
+| `filename` | 文件名 | 对应 `filename` |
+| `extension` | 小写扩展名 | 对应 `extension` |
+| `size_bytes` | 文件大小 | 对应 `size_bytes` |
+| `status` | 固定为 `discovered` | GTSinger mini 中为 `sampled` |
+
+注意：`discover_audio.py` **只扫描并写 manifest，不复制音频**。因此它不会像 `create_gtsinger_mini_dataset.py` 那样创建一份自包含的小数据集副本；`audio_path` 会指向原始音频位置。如果你希望后续流程和 GTSinger mini 一样好管理，推荐把输出 manifest 放到一个数据集目录下：
 
 ```bash
 python pipeline/scripts/discover_audio.py \
-  --dataset-root /path/to/dataset \
-  --output pipeline/manifests/00_discovered.jsonl
+  --dataset-root ../music_example \
+  --output data/music_example/manifest.jsonl \
+  --extensions .wav
+```
+
+同时复制一份阶段 manifest，便于后续命令引用：
+
+```bash
+cp data/music_example/manifest.jsonl \
+  pipeline/manifests/00_discovered.music_example.jsonl
+```
+
+如果只是快速构建 pipeline 阶段清单，也可以直接输出到 `pipeline/manifests`：
+
+```bash
+python pipeline/scripts/discover_audio.py \
+  --dataset-root ../music_example \
+  --output pipeline/manifests/00_discovered.music_example.jsonl \
+  --extensions .wav
 ```
 
 包含更多音频格式：
 
 ```bash
 python pipeline/scripts/discover_audio.py \
-  --dataset-root /path/to/dataset \
-  --output pipeline/manifests/00_discovered.jsonl \
+  --dataset-root ../music_example \
+  --output pipeline/manifests/00_discovered.music_example.jsonl \
   --extensions .wav .flac .mp3 .m4a .ogg \
   --include-hidden \
   --follow-symlinks
@@ -484,11 +513,31 @@ python pipeline/scripts/discover_audio.py \
 
 | 参数 | 说明 | 默认值 |
 | --- | --- | --- |
-| `--dataset-root` | 要递归扫描的数据集根目录 | 必填 |
-| `--output` | 输出 JSONL manifest | 必填 |
-| `--extensions` | 要包含的音频扩展名 | 常见音频格式 |
+| `--dataset-root` | 要递归扫描的数据集根目录，例如 `../music_example` | 必填 |
+| `--output` | 输出 JSONL manifest；建议用 `data/<dataset_name>/manifest.jsonl` 或 `pipeline/manifests/00_discovered.<dataset_name>.jsonl` | 必填 |
+| `--extensions` | 要包含的音频扩展名；如果下一步直接跑当前 SoulX 对齐脚本，建议先只用 `.wav` | `.wav .flac .mp3 .m4a .ogg` |
 | `--include-hidden` | 包含隐藏文件和隐藏目录 | 不开启 |
 | `--follow-symlinks` | 递归扫描符号链接目录 | 不开启 |
+
+和后续 SoulX 对齐衔接时需要注意：当前 `run_soulx_alignment_batch.py` 仍然从 `--audio-root` 递归查找 `*.wav`，没有直接读取 `00_discovered` manifest。因此用 `../music_example` 构建清单后，对齐命令应使用同一个音频根目录：
+
+```bash
+conda run -n align python pipeline/scripts/run_soulx_alignment_batch.py \
+  --audio-root ../music_example \
+  --soulx-root SoulX-Singer \
+  --output-root pipeline/runs/soulx_align_music_example \
+  --conda-env align \
+  --language Mandarin \
+  --device cuda \
+  --resume
+```
+
+对齐完成后，如果要沿用现有歌词修改任务生成流程，可以把对齐结果复制为阶段 manifest：
+
+```bash
+cp pipeline/runs/soulx_align_music_example/alignment_results.jsonl \
+  pipeline/manifests/01_aligned.music_example.jsonl
+```
 
 ## 推荐的一键顺序
 

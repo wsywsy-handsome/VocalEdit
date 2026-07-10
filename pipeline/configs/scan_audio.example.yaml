@@ -3,8 +3,8 @@
 # settings for a run and can become the source config when the pipeline runner
 # is added.
 
-dataset_root: /path/to/dataset
-output_manifest: pipeline/manifests/00_discovered.jsonl
+dataset_root: ../music_example
+output_manifest: pipeline/manifests/00_discovered.music_example.jsonl
 
 extensions:
   - .wav
