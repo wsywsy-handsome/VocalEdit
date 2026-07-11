@@ -33,6 +33,16 @@ class LyricChar:
     note_type: int
 
 
+@dataclass
+class LyricSegment:
+    segment_index: int
+    segment_id: str
+    start_sec: float
+    end_sec: float
+    lyrics: str
+    chars: list[LyricChar]
+
+
 class TaskError(ValueError):
     pass
 
@@ -130,15 +140,17 @@ def normalize_soulx_token(token: str) -> str:
     return token.replace("<AP>", "<SP>")
 
 
-def parse_soulx_metadata(metadata_path: Path) -> tuple[str, list[LyricChar]]:
+def parse_soulx_metadata_segments(metadata_path: Path) -> list[LyricSegment]:
     segments = json.loads(metadata_path.read_text(encoding="utf-8"))
     if not isinstance(segments, list) or not segments:
         raise TaskError(f"SoulX metadata has no segments: {metadata_path}")
 
-    chars: list[LyricChar] = []
+    parsed_segments: list[LyricSegment] = []
     for seg_idx, seg in enumerate(segments):
         try:
             seg_start_sec = float(seg["time"][0]) / 1000.0
+            seg_end_sec = float(seg["time"][1]) / 1000.0
+            segment_id = str(seg.get("index") or f"segment_{seg_idx:03d}")
             words = [normalize_soulx_token(x) for x in str(seg["text"]).split()]
             durs = parse_float_list(str(seg["duration"]))
             types = parse_int_list(str(seg["note_type"]))
@@ -151,6 +163,7 @@ def parse_soulx_metadata(metadata_path: Path) -> tuple[str, list[LyricChar]]:
                 f"text={len(words)} duration={len(durs)} note_type={len(types)}"
             )
 
+        chars: list[LyricChar] = []
         cursor = seg_start_sec
         for token_idx, (word, dur, note_type) in enumerate(zip(words, durs, types)):
             start_sec = cursor
@@ -181,10 +194,44 @@ def parse_soulx_metadata(metadata_path: Path) -> tuple[str, list[LyricChar]]:
 
             raise TaskError(f"Unsupported note_type={note_type} in {metadata_path}")
 
-    lyrics = "".join(item.char for item in chars)
-    if not lyrics:
+        lyrics = "".join(item.char for item in chars)
+        if lyrics:
+            parsed_segments.append(
+                LyricSegment(
+                    segment_index=seg_idx,
+                    segment_id=segment_id,
+                    start_sec=seg_start_sec,
+                    end_sec=seg_end_sec,
+                    lyrics=lyrics,
+                    chars=chars,
+                )
+            )
+
+    if not parsed_segments:
         raise TaskError(f"No Chinese lyrics found in {metadata_path}")
-    return lyrics, chars
+    return parsed_segments
+
+
+def parse_soulx_metadata(metadata_path: Path) -> tuple[str, list[LyricChar]]:
+    segments = parse_soulx_metadata_segments(metadata_path)
+    lyrics_parts: list[str] = []
+    chars: list[LyricChar] = []
+    for segment in segments:
+        offset = len(chars)
+        lyrics_parts.append(segment.lyrics)
+        for char in segment.chars:
+            chars.append(
+                LyricChar(
+                    char=char.char,
+                    char_index=offset + char.char_index,
+                    start_sec=char.start_sec,
+                    end_sec=char.end_sec,
+                    source_segment=char.source_segment,
+                    source_token_index=char.source_token_index,
+                    note_type=char.note_type,
+                )
+            )
+    return "".join(lyrics_parts), chars
 
 
 def pinyin_no_tone(text: str) -> list[str]:
@@ -359,14 +406,24 @@ def call_deepseek(
 
 def build_success_record(
     aligned_item: dict[str, Any],
-    lyrics: str,
+    segment: LyricSegment,
     edit: dict[str, Any],
+    *,
+    total_segments: int,
 ) -> dict[str, Any]:
+    base_id = str(aligned_item["id"])
+    task_id = base_id if total_segments == 1 else f"{base_id}_seg{segment.segment_index:03d}"
     return {
-        "id": aligned_item["id"],
+        "id": task_id,
+        "source_id": base_id,
         "audio_path": aligned_item["audio_path"],
         "metadata_path": aligned_item["metadata_path"],
-        "original_lyrics": lyrics,
+        "segment_index": segment.segment_index,
+        "segment_id": segment.segment_id,
+        "segment_start_sec": round(segment.start_sec, 6),
+        "segment_end_sec": round(segment.end_sec, 6),
+        "segment_duration_sec": round(segment.end_sec - segment.start_sec, 6),
+        "original_lyrics": segment.lyrics,
         "edited_lyrics": edit["edited_lyrics"],
         "original_word": edit["original_word"],
         "replacement_word": edit["replacement_word"],
@@ -374,15 +431,19 @@ def build_success_record(
         "char_end": edit["char_end"],
         "edit_start_sec": edit["edit_start_sec"],
         "edit_end_sec": edit["edit_end_sec"],
+        "local_edit_start_sec": round(edit["edit_start_sec"] - segment.start_sec, 6),
+        "local_edit_end_sec": round(edit["edit_end_sec"] - segment.start_sec, 6),
         "original_pinyin": edit["original_pinyin"],
         "replacement_pinyin": edit["replacement_pinyin"],
         "status": "success",
     }
 
 
-def build_task_for_item(
+def build_task_for_segment(
     *,
     item: dict[str, Any],
+    segment: LyricSegment,
+    total_segments: int,
     api_key: str,
     base_url: str,
     model: str,
@@ -391,16 +452,14 @@ def build_task_for_item(
     max_word_len: int,
     seed: int,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    metadata_path = Path(str(item["metadata_path"]))
-    lyrics, chars = parse_soulx_metadata(metadata_path)
     previous_error = None
     raw_response = None
 
     for attempt in range(1, max_retries + 1):
         try:
             messages = build_prompt(
-                lyrics=lyrics,
-                chars=chars,
+                lyrics=segment.lyrics,
+                chars=segment.chars,
                 max_word_len=max_word_len,
                 previous_error=previous_error,
             )
@@ -414,22 +473,32 @@ def build_task_for_item(
             )
             response = extract_json_object(raw_response)
             edit = validate_edit(
-                lyrics=lyrics,
-                chars=chars,
+                lyrics=segment.lyrics,
+                chars=segment.chars,
                 response=response,
                 max_word_len=max_word_len,
             )
-            return build_success_record(item, lyrics, edit), None
+            return build_success_record(
+                item,
+                segment,
+                edit,
+                total_segments=total_segments,
+            ), None
         except Exception as exc:
             previous_error = str(exc)
             if attempt < max_retries:
                 time.sleep(min(2 * attempt, 5))
 
     failed = {
-        "id": item.get("id"),
+        "id": f"{item.get('id')}_seg{segment.segment_index:03d}",
+        "source_id": item.get("id"),
         "audio_path": item.get("audio_path"),
         "metadata_path": item.get("metadata_path"),
-        "original_lyrics": lyrics,
+        "segment_index": segment.segment_index,
+        "segment_id": segment.segment_id,
+        "segment_start_sec": round(segment.start_sec, 6),
+        "segment_end_sec": round(segment.end_sec, 6),
+        "original_lyrics": segment.lyrics,
         "status": "failed",
         "error": previous_error,
         "raw_response": raw_response,
@@ -457,25 +526,30 @@ def main() -> int:
 
     if args.dry_run:
         for item in items:
-            lyrics, chars = parse_soulx_metadata(Path(str(item["metadata_path"])))
-            print(
-                json.dumps(
-                    {
-                        "id": item["id"],
-                        "lyrics": lyrics,
-                        "n_chars": len(chars),
-                        "first_chars": [
-                            {
-                                "char": c.char,
-                                "start_sec": round(c.start_sec, 3),
-                                "end_sec": round(c.end_sec, 3),
-                            }
-                            for c in chars[:8]
-                        ],
-                    },
-                    ensure_ascii=False,
+            segments = parse_soulx_metadata_segments(Path(str(item["metadata_path"])))
+            for segment in segments:
+                print(
+                    json.dumps(
+                        {
+                            "id": item["id"],
+                            "segment_index": segment.segment_index,
+                            "segment_id": segment.segment_id,
+                            "segment_start_sec": round(segment.start_sec, 3),
+                            "segment_end_sec": round(segment.end_sec, 3),
+                            "lyrics": segment.lyrics,
+                            "n_chars": len(segment.chars),
+                            "first_chars": [
+                                {
+                                    "char": c.char,
+                                    "start_sec": round(c.start_sec, 3),
+                                    "end_sec": round(c.end_sec, 3),
+                                }
+                                for c in segment.chars[:8]
+                            ],
+                        },
+                        ensure_ascii=False,
+                    )
                 )
-            )
         return 0
 
     api_key = load_env_key(args.env_file)
@@ -491,29 +565,52 @@ def main() -> int:
     ) as failed_handle:
         for idx, item in enumerate(items, start=1):
             print(f"[{idx}/{len(items)}] {item.get('id')}")
-            success, failed = build_task_for_item(
-                item=item,
-                api_key=api_key,
-                base_url=args.base_url,
-                model=args.model,
-                timeout=args.timeout,
-                max_retries=args.max_retries,
-                max_word_len=args.max_word_len,
-                seed=args.seed + idx * 1000,
-            )
-            if success is not None:
-                success_handle.write(json.dumps(success, ensure_ascii=False) + "\n")
-                success_handle.flush()
-                success_count += 1
-                print(
-                    f"  ok: {success['original_word']} -> {success['replacement_word']} "
-                    f"@ {success['edit_start_sec']:.3f}-{success['edit_end_sec']:.3f}s"
-                )
-            if failed is not None:
+            try:
+                segments = parse_soulx_metadata_segments(Path(str(item["metadata_path"])))
+            except Exception as exc:
+                failed = {
+                    "id": item.get("id"),
+                    "audio_path": item.get("audio_path"),
+                    "metadata_path": item.get("metadata_path"),
+                    "status": "failed",
+                    "error": str(exc),
+                }
                 failed_handle.write(json.dumps(failed, ensure_ascii=False) + "\n")
                 failed_handle.flush()
                 failed_count += 1
                 print(f"  failed: {failed['error']}")
+                continue
+
+            for seg_pos, segment in enumerate(segments, start=1):
+                print(
+                    f"  segment {seg_pos}/{len(segments)} "
+                    f"@ {segment.start_sec:.3f}-{segment.end_sec:.3f}s"
+                )
+                success, failed = build_task_for_segment(
+                    item=item,
+                    segment=segment,
+                    total_segments=len(segments),
+                    api_key=api_key,
+                    base_url=args.base_url,
+                    model=args.model,
+                    timeout=args.timeout,
+                    max_retries=args.max_retries,
+                    max_word_len=args.max_word_len,
+                    seed=args.seed + idx * 1000 + segment.segment_index * 100,
+                )
+                if success is not None:
+                    success_handle.write(json.dumps(success, ensure_ascii=False) + "\n")
+                    success_handle.flush()
+                    success_count += 1
+                    print(
+                        f"    ok: {success['original_word']} -> {success['replacement_word']} "
+                        f"@ {success['edit_start_sec']:.3f}-{success['edit_end_sec']:.3f}s"
+                    )
+                if failed is not None:
+                    failed_handle.write(json.dumps(failed, ensure_ascii=False) + "\n")
+                    failed_handle.flush()
+                    failed_count += 1
+                    print(f"    failed: {failed['error']}")
 
     print(f"Wrote {success_count} success task(s) to {args.output}")
     print(f"Wrote {failed_count} failed task(s) to {failed_path}")

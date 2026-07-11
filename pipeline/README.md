@@ -176,6 +176,8 @@ cp pipeline/runs/soulx_align_gtsinger_mini_40_chinese/alignment_results.jsonl \
 | `--follow-symlinks` | 递归扫描符号链接目录 | 不开启 |
 | `--resume` | 跳过已经成功的条目，继续未完成任务 | 不开启 |
 
+注意：SoulX 的 `metadata.json` 是一个 segment 数组。`--max-merge-duration 30000` 表示预处理会尽量把每个 segment 控制在约 30 秒以内；长音频通常会得到多段 metadata。后续歌词任务生成脚本会逐 segment 生成任务，并在 task 中写入 `segment_start_sec`、`segment_end_sec`、`local_edit_start_sec`、`local_edit_end_sec`。
+
 注意：SoulX 的 `metadata.json` 中 `note_type` 有三类：
 
 - `1`：静音或空白，如 `<SP>`。
@@ -192,7 +194,7 @@ cp pipeline/runs/soulx_align_gtsinger_mini_40_chinese/alignment_results.jsonl \
 pipeline/scripts/create_lyric_edit_tasks.py
 ```
 
-用途：读取 SoulX 对齐结果中的 `metadata.json`，还原 ASR 歌词和每个中文字的时间戳，然后调用 DeepSeek 选择一个词并替换为同字数、不同拼音的词。
+用途：读取 SoulX 对齐结果中的 `metadata.json`，按 SoulX segment 还原 ASR 歌词和每个中文字的时间戳，然后调用 DeepSeek 为每个有效 segment 选择一个词并替换为同字数、不同拼音的词。长音频会自然拆成多个短任务。
 
 示例命令：
 
@@ -292,7 +294,8 @@ pipeline/scripts/run_yingmusic_lyric_edit_tasks.py
 示例命令：
 
 ```bash
-HF_ENDPOINT=https://hf-mirror.com python pipeline/scripts/run_yingmusic_lyric_edit_tasks.py \
+HF_ENDPOINT=https://hf-mirror.com \
+python pipeline/scripts/run_yingmusic_lyric_edit_tasks.py \
   --task-manifest pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_40_chinese.jsonl \
   --yingmusic-root YingMusic-Singer-Plus \
   --output-dir pipeline/runs/yingmusic_lyric_edit_gtsinger_mini_40_chinese_hardmask \

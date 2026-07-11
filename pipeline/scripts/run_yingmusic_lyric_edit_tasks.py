@@ -82,6 +82,60 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
     return items
 
 
+def prepare_task_audio(
+    *,
+    task: dict[str, Any],
+    segments_dir: Path,
+    torchaudio: Any,
+) -> tuple[Path, float, float, dict[str, Any]]:
+    audio_path = Path(str(task["audio_path"]))
+    if "segment_start_sec" not in task or "segment_end_sec" not in task:
+        return audio_path, float(task["edit_start_sec"]), float(task["edit_end_sec"]), {}
+
+    segment_start_sec = float(task["segment_start_sec"])
+    segment_end_sec = float(task["segment_end_sec"])
+    if segment_end_sec <= segment_start_sec:
+        raise ValueError(
+            f"Invalid segment span: {segment_start_sec} - {segment_end_sec}"
+        )
+
+    waveform, sample_rate = torchaudio.load(str(audio_path))
+    start_frame = max(0, int(round(segment_start_sec * sample_rate)))
+    end_frame = min(waveform.shape[1], int(round(segment_end_sec * sample_rate)))
+    if end_frame <= start_frame:
+        raise ValueError(
+            f"Segment span produced empty audio: {segment_start_sec} - {segment_end_sec}"
+        )
+
+    segment_audio = waveform[:, start_frame:end_frame]
+    segments_dir.mkdir(parents=True, exist_ok=True)
+    segment_audio_path = segments_dir / f"{task['id']}.wav"
+    torchaudio.save(str(segment_audio_path), segment_audio, sample_rate=sample_rate)
+
+    local_edit_start = float(
+        task.get("local_edit_start_sec", float(task["edit_start_sec"]) - segment_start_sec)
+    )
+    local_edit_end = float(
+        task.get("local_edit_end_sec", float(task["edit_end_sec"]) - segment_start_sec)
+    )
+    local_edit_start = max(0.0, local_edit_start)
+    local_edit_end = min(float(segment_audio.shape[1] / sample_rate), local_edit_end)
+    if local_edit_end <= local_edit_start:
+        raise ValueError(
+            f"Local edit span is empty: {local_edit_start} - {local_edit_end}"
+        )
+
+    extra = {
+        "source_audio_path": str(audio_path),
+        "segment_audio_path": str(segment_audio_path),
+        "segment_start_sec": segment_start_sec,
+        "segment_end_sec": segment_end_sec,
+        "local_edit_start_sec": local_edit_start,
+        "local_edit_end_sec": local_edit_end,
+    }
+    return segment_audio_path, local_edit_start, local_edit_end, extra
+
+
 def main() -> int:
     args = parse_args()
     maybe_reexec_in_conda(args)
@@ -112,6 +166,7 @@ def main() -> int:
 
     wav_dir = output_dir / "wavs"
     logs_dir = output_dir / "logs"
+    segments_dir = output_dir / "segments"
     output_dir.mkdir(parents=True, exist_ok=True)
     wav_dir.mkdir(parents=True, exist_ok=True)
     logs_dir.mkdir(parents=True, exist_ok=True)
@@ -143,10 +198,15 @@ def main() -> int:
                 continue
 
             try:
+                melody_audio_path, model_edit_start, model_edit_end, segment_extra = prepare_task_audio(
+                    task=task,
+                    segments_dir=segments_dir,
+                    torchaudio=torchaudio,
+                )
                 with torch.inference_mode():
                     audio, sr = model(
                         ref_audio_path=None,
-                        melody_audio_path=task["audio_path"],
+                        melody_audio_path=str(melody_audio_path),
                         ref_text=task["original_lyrics"],
                         target_text=task["edited_lyrics"],
                         lrc_align_mode="sentence_level",
@@ -155,8 +215,8 @@ def main() -> int:
                         nfe_step=args.nfe_step,
                         cfg_strength=args.cfg_strength,
                         seed=args.seed + idx,
-                        edit_start_sec=task["edit_start_sec"],
-                        edit_end_sec=task["edit_end_sec"],
+                        edit_start_sec=model_edit_start,
+                        edit_end_sec=model_edit_end,
                         edit_mask_start_offset_sec=args.mask_start_offset_sec,
                         edit_mask_end_offset_sec=args.mask_end_offset_sec,
                     )
@@ -171,11 +231,14 @@ def main() -> int:
                     "replacement_word": task["replacement_word"],
                     "edit_start_sec": task["edit_start_sec"],
                     "edit_end_sec": task["edit_end_sec"],
+                    "model_edit_start_sec": model_edit_start,
+                    "model_edit_end_sec": model_edit_end,
                     "mask_start_offset_sec": args.mask_start_offset_sec,
                     "mask_end_offset_sec": args.mask_end_offset_sec,
-                    "mask_start_sec": max(0.0, float(task["edit_start_sec"]) - args.mask_start_offset_sec),
-                    "mask_end_sec": float(task["edit_end_sec"]) + args.mask_end_offset_sec,
+                    "mask_start_sec": max(0.0, model_edit_start - args.mask_start_offset_sec),
+                    "mask_end_sec": model_edit_end + args.mask_end_offset_sec,
                     "status": "success",
+                    **segment_extra,
                 }
                 log_path.write_text("", encoding="utf-8")
                 success += 1
