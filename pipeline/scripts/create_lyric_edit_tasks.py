@@ -20,6 +20,8 @@ from pypinyin import Style, lazy_pinyin
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_BASE_URL = "https://api.deepseek.com/chat/completions"
 CHINESE_RE = re.compile(r"^[\u4e00-\u9fff]+$")
+ENGLISH_TOKEN_RE = re.compile(r"^[A-Za-z]+(?:['-][A-Za-z]+)*$")
+SUPPORTED_LANGUAGES = {"auto", "Chinese", "English"}
 
 
 @dataclass
@@ -31,6 +33,9 @@ class LyricChar:
     source_segment: int
     source_token_index: int
     note_type: int
+    token_index: int | None = None
+    text_start: int | None = None
+    text_end: int | None = None
 
 
 @dataclass
@@ -41,6 +46,7 @@ class LyricSegment:
     end_sec: float
     lyrics: str
     chars: list[LyricChar]
+    language: str = "Chinese"
 
 
 class TaskError(ValueError):
@@ -49,7 +55,7 @@ class TaskError(ValueError):
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate Chinese lyric edit tasks from SoulX metadata."
+        description="Generate lyric edit tasks from SoulX metadata."
     )
     parser.add_argument(
         "--input-manifest",
@@ -79,6 +85,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL)
     parser.add_argument("--max-retries", type=int, default=3)
     parser.add_argument("--max-word-len", type=int, default=4)
+    parser.add_argument(
+        "--language",
+        choices=sorted(SUPPORTED_LANGUAGES),
+        default="auto",
+        help="Task language. auto uses the aligned manifest/metadata language.",
+    )
     parser.add_argument("--timeout", type=float, default=60.0)
     parser.add_argument("--seed", type=int, default=20260706)
     parser.add_argument("--limit", type=int, default=None)
@@ -136,15 +148,39 @@ def is_chinese_text(text: str) -> bool:
     return bool(CHINESE_RE.fullmatch(text))
 
 
+def is_english_token(text: str) -> bool:
+    return bool(ENGLISH_TOKEN_RE.fullmatch(text))
+
+
 def normalize_soulx_token(token: str) -> str:
     return token.replace("<AP>", "<SP>")
 
 
-def parse_soulx_metadata_segments(metadata_path: Path) -> list[LyricSegment]:
+def resolve_language(
+    requested: str,
+    aligned_item: dict[str, Any] | None,
+    metadata_language: str | None,
+) -> str:
+    if requested != "auto":
+        return requested
+    candidate = metadata_language or (aligned_item or {}).get("language")
+    if str(candidate).lower() == "english":
+        return "English"
+    return "Chinese"
+
+
+def parse_soulx_metadata_segments(
+    metadata_path: Path,
+    *,
+    language: str = "auto",
+    aligned_item: dict[str, Any] | None = None,
+) -> list[LyricSegment]:
     segments = json.loads(metadata_path.read_text(encoding="utf-8"))
     if not isinstance(segments, list) or not segments:
         raise TaskError(f"SoulX metadata has no segments: {metadata_path}")
 
+    first_language = str(segments[0].get("language", "")) if isinstance(segments[0], dict) else None
+    resolved_language = resolve_language(language, aligned_item, first_language)
     parsed_segments: list[LyricSegment] = []
     for seg_idx, seg in enumerate(segments):
         try:
@@ -164,6 +200,7 @@ def parse_soulx_metadata_segments(metadata_path: Path) -> list[LyricSegment]:
             )
 
         chars: list[LyricChar] = []
+        lyric_parts: list[str] = []
         cursor = seg_start_sec
         for token_idx, (word, dur, note_type) in enumerate(zip(words, durs, types)):
             start_sec = cursor
@@ -173,19 +210,42 @@ def parse_soulx_metadata_segments(metadata_path: Path) -> list[LyricSegment]:
             if word == "<SP>" or note_type == 1:
                 continue
             if note_type == 2:
-                if not is_chinese_text(word):
-                    continue
-                chars.append(
-                    LyricChar(
-                        char=word,
-                        char_index=len(chars),
-                        start_sec=start_sec,
-                        end_sec=end_sec,
-                        source_segment=seg_idx,
-                        source_token_index=token_idx,
-                        note_type=note_type,
+                if resolved_language == "Chinese":
+                    if not is_chinese_text(word):
+                        continue
+                    chars.append(
+                        LyricChar(
+                            char=word,
+                            char_index=len(chars),
+                            start_sec=start_sec,
+                            end_sec=end_sec,
+                            source_segment=seg_idx,
+                            source_token_index=token_idx,
+                            note_type=note_type,
+                        )
                     )
-                )
+                else:
+                    if not is_english_token(word):
+                        continue
+                    if lyric_parts:
+                        lyric_parts.append(" ")
+                    text_start = sum(len(part) for part in lyric_parts)
+                    lyric_parts.append(word)
+                    text_end = text_start + len(word)
+                    chars.append(
+                        LyricChar(
+                            char=word,
+                            char_index=text_start,
+                            start_sec=start_sec,
+                            end_sec=end_sec,
+                            source_segment=seg_idx,
+                            source_token_index=token_idx,
+                            note_type=note_type,
+                            token_index=len(chars),
+                            text_start=text_start,
+                            text_end=text_end,
+                        )
+                    )
                 continue
             if note_type == 3:
                 if chars:
@@ -194,7 +254,7 @@ def parse_soulx_metadata_segments(metadata_path: Path) -> list[LyricSegment]:
 
             raise TaskError(f"Unsupported note_type={note_type} in {metadata_path}")
 
-        lyrics = "".join(item.char for item in chars)
+        lyrics = "".join(item.char for item in chars) if resolved_language == "Chinese" else "".join(lyric_parts)
         if lyrics:
             parsed_segments.append(
                 LyricSegment(
@@ -204,11 +264,12 @@ def parse_soulx_metadata_segments(metadata_path: Path) -> list[LyricSegment]:
                     end_sec=seg_end_sec,
                     lyrics=lyrics,
                     chars=chars,
+                    language=resolved_language,
                 )
             )
 
     if not parsed_segments:
-        raise TaskError(f"No Chinese lyrics found in {metadata_path}")
+        raise TaskError(f"No {resolved_language} lyrics found in {metadata_path}")
     return parsed_segments
 
 
@@ -218,24 +279,77 @@ def parse_soulx_metadata(metadata_path: Path) -> tuple[str, list[LyricChar]]:
     chars: list[LyricChar] = []
     for segment in segments:
         offset = len(chars)
+        text_offset = sum(len(part) for part in lyrics_parts)
+        if lyrics_parts and segment.language == "English":
+            lyrics_parts.append(" ")
+            text_offset += 1
         lyrics_parts.append(segment.lyrics)
         for char in segment.chars:
             chars.append(
                 LyricChar(
                     char=char.char,
-                    char_index=offset + char.char_index,
+                    char_index=(text_offset + char.char_index if segment.language == "English" else offset + char.char_index),
                     start_sec=char.start_sec,
                     end_sec=char.end_sec,
                     source_segment=char.source_segment,
                     source_token_index=char.source_token_index,
                     note_type=char.note_type,
+                    token_index=(offset + char.token_index if char.token_index is not None else None),
+                    text_start=(text_offset + char.text_start if char.text_start is not None else None),
+                    text_end=(text_offset + char.text_end if char.text_end is not None else None),
                 )
             )
     return "".join(lyrics_parts), chars
 
-
 def pinyin_no_tone(text: str) -> list[str]:
     return lazy_pinyin(text, style=Style.NORMAL, errors="default")
+
+
+def find_english_token_span(
+    *,
+    lyrics: str,
+    chars: list[LyricChar],
+    original_word: str,
+    token_start: int | None,
+    token_end: int | None,
+    char_start: int | None,
+    char_end: int | None,
+) -> tuple[int, int, int, int]:
+    if token_start is not None and token_end is not None:
+        if not (0 <= token_start < token_end <= len(chars)):
+            raise TaskError("token_start/token_end out of range")
+        selected = chars[token_start:token_end]
+        text_start = selected[0].text_start
+        text_end = selected[-1].text_end
+        if text_start is None or text_end is None:
+            raise TaskError("English token is missing text offsets")
+        span = lyrics[text_start:text_end]
+        if span != original_word:
+            raise TaskError(f"original_word does not match token span: {original_word!r} != {span!r}")
+        return text_start, text_end, token_start, token_end
+
+    if char_start is None or char_end is None:
+        raise TaskError("English edit must provide token_start/token_end or char_start/char_end")
+    if not (0 <= char_start < char_end <= len(lyrics)):
+        raise TaskError("char_start/char_end out of range")
+    if lyrics[char_start:char_end] != original_word:
+        raise TaskError(
+            f"original_word does not match lyrics span: {original_word!r} != {lyrics[char_start:char_end]!r}"
+        )
+
+    matched = [
+        idx
+        for idx, token in enumerate(chars)
+        if token.text_start is not None
+        and token.text_end is not None
+        and token.text_start >= char_start
+        and token.text_end <= char_end
+    ]
+    if not matched:
+        raise TaskError("char span does not cover any English token")
+    if chars[matched[0]].text_start != char_start or chars[matched[-1]].text_end != char_end:
+        raise TaskError("char span must align to complete English token boundaries")
+    return char_start, char_end, matched[0], matched[-1] + 1
 
 
 def validate_edit(
@@ -244,14 +358,67 @@ def validate_edit(
     chars: list[LyricChar],
     response: dict[str, Any],
     max_word_len: int,
+    language: str,
 ) -> dict[str, Any]:
-    required = {"original_word", "replacement_word", "char_start", "char_end"}
+    required = {"original_word", "replacement_word"}
+    if language == "English":
+        if not ({"token_start", "token_end"} <= response.keys() or {"char_start", "char_end"} <= response.keys()):
+            raise TaskError("Missing English span keys: provide token_start/token_end or char_start/char_end")
+    else:
+        required |= {"char_start", "char_end"}
     missing = required - response.keys()
     if missing:
         raise TaskError(f"Missing keys: {sorted(missing)}")
 
     original_word = str(response["original_word"]).strip()
     replacement_word = str(response["replacement_word"]).strip()
+
+    if language == "English":
+        try:
+            token_start = int(response["token_start"]) if "token_start" in response else None
+            token_end = int(response["token_end"]) if "token_end" in response else None
+            char_start = int(response["char_start"]) if "char_start" in response else None
+            char_end = int(response["char_end"]) if "char_end" in response else None
+        except (TypeError, ValueError) as exc:
+            raise TaskError("English span indexes must be integers") from exc
+
+        char_start, char_end, token_start, token_end = find_english_token_span(
+            lyrics=lyrics,
+            chars=chars,
+            original_word=original_word,
+            token_start=token_start,
+            token_end=token_end,
+            char_start=char_start,
+            char_end=char_end,
+        )
+        original_tokens = original_word.split()
+        replacement_tokens = replacement_word.split()
+        if not (1 <= len(original_tokens) <= max_word_len):
+            raise TaskError(f"selected phrase must contain 1 to {max_word_len} English words")
+        if len(original_tokens) != len(replacement_tokens):
+            raise TaskError("replacement_word must have the same number of English words as original_word")
+        if any(not is_english_token(token) for token in original_tokens + replacement_tokens):
+            raise TaskError("English words may only contain letters, apostrophes, or hyphens")
+        if original_word.lower() == replacement_word.lower():
+            raise TaskError("replacement_word is identical to original_word")
+
+        edited_lyrics = lyrics[:char_start] + replacement_word + lyrics[char_end:]
+        edit_chars = chars[token_start:token_end]
+        return {
+            "original_word": original_word,
+            "replacement_word": replacement_word,
+            "char_start": char_start,
+            "char_end": char_end,
+            "edited_char_end": char_start + len(replacement_word),
+            "token_start": token_start,
+            "token_end": token_end,
+            "edit_start_sec": round(edit_chars[0].start_sec, 6),
+            "edit_end_sec": round(edit_chars[-1].end_sec, 6),
+            "edited_lyrics": edited_lyrics,
+            "original_pinyin": [],
+            "replacement_pinyin": [],
+        }
+
     try:
         char_start = int(response["char_start"])
         char_end = int(response["char_end"])
@@ -303,13 +470,13 @@ def validate_edit(
         "replacement_word": replacement_word,
         "char_start": char_start,
         "char_end": char_end,
+        "edited_char_end": char_start + len(replacement_word),
         "edit_start_sec": round(edit_chars[0].start_sec, 6),
         "edit_end_sec": round(edit_chars[-1].end_sec, 6),
         "edited_lyrics": edited_lyrics,
         "original_pinyin": original_pinyin,
         "replacement_pinyin": replacement_pinyin,
     }
-
 
 def extract_json_object(text: str) -> dict[str, Any]:
     text = text.strip()
@@ -334,9 +501,33 @@ def build_prompt(
     chars: list[LyricChar],
     max_word_len: int,
     previous_error: str | None,
+    language: str,
 ) -> list[dict[str, str]]:
-    indexed_chars = " ".join(f"{item.char_index}:{item.char}" for item in chars)
-    user_content = f"""请为下面的中文歌词设计一个局部歌词替换任务。
+    if language == "English":
+        indexed_tokens = " ".join(f"{idx}:{item.char}" for idx, item in enumerate(chars))
+        user_content = f"""Design a local lyric replacement task for the following English lyrics.
+
+Original lyrics: {lyrics}
+Indexed words: {indexed_tokens}
+
+Requirements:
+1. Choose a natural English phrase containing 1 to {max_word_len} complete words.
+2. replacement_word must contain the same number of words as original_word.
+3. replacement_word should sound clearly different from original_word, but no phoneme validation is required.
+4. The edited lyric should still read like a natural lyric line.
+5. Do not choose punctuation, silence markers, partial words, or a span that does not exist.
+6. Output JSON only, with no explanation.
+
+token_end must be exclusive, equal to token_start + the number of selected words.
+For example, if indexed words contain 3:give 4:you, selecting "give you" must return "token_start":3,"token_end":5.
+
+JSON format:
+{{"original_word":"old phrase","replacement_word":"new phrase","token_start":0,"token_end":1}}
+"""
+        system_content = "You are an English lyric editing assistant. Output exactly one strict JSON object."
+    else:
+        indexed_chars = " ".join(f"{item.char_index}:{item.char}" for item in chars)
+        user_content = f"""请为下面的中文歌词设计一个局部歌词替换任务。
 
 原歌词：{lyrics}
 带索引字符：{indexed_chars}
@@ -355,17 +546,15 @@ char_end 必须是 exclusive 结束索引，也就是 char_start + original_word
 JSON 格式：
 {{"original_word":"原词","replacement_word":"新词","char_start":0,"char_end":1}}
 """
+        system_content = "你是中文歌词编辑助手，只能输出一个严格 JSON 对象。"
+
     if previous_error:
-        user_content += f"\n上一次输出不合规，错误是：{previous_error}\n请重新输出。"
+        user_content += f"\n上一次输出不合规，错误是：{previous_error}\n请重新输出。" if language == "Chinese" else f"\nThe previous output was invalid: {previous_error}\nPlease output a corrected JSON object."
 
     return [
-        {
-            "role": "system",
-            "content": "你是中文歌词编辑助手，只能输出一个严格 JSON 对象。",
-        },
+        {"role": "system", "content": system_content},
         {"role": "user", "content": user_content},
     ]
-
 
 def call_deepseek(
     *,
@@ -423,12 +612,16 @@ def build_success_record(
         "segment_start_sec": round(segment.start_sec, 6),
         "segment_end_sec": round(segment.end_sec, 6),
         "segment_duration_sec": round(segment.end_sec - segment.start_sec, 6),
+        "language": segment.language,
         "original_lyrics": segment.lyrics,
         "edited_lyrics": edit["edited_lyrics"],
         "original_word": edit["original_word"],
         "replacement_word": edit["replacement_word"],
         "char_start": edit["char_start"],
         "char_end": edit["char_end"],
+        "edited_char_end": edit.get("edited_char_end"),
+        "token_start": edit.get("token_start"),
+        "token_end": edit.get("token_end"),
         "edit_start_sec": edit["edit_start_sec"],
         "edit_end_sec": edit["edit_end_sec"],
         "local_edit_start_sec": round(edit["edit_start_sec"] - segment.start_sec, 6),
@@ -462,6 +655,7 @@ def build_task_for_segment(
                 chars=segment.chars,
                 max_word_len=max_word_len,
                 previous_error=previous_error,
+                language=segment.language,
             )
             raw_response = call_deepseek(
                 api_key=api_key,
@@ -477,6 +671,7 @@ def build_task_for_segment(
                 chars=segment.chars,
                 response=response,
                 max_word_len=max_word_len,
+                language=segment.language,
             )
             return build_success_record(
                 item,
@@ -526,7 +721,11 @@ def main() -> int:
 
     if args.dry_run:
         for item in items:
-            segments = parse_soulx_metadata_segments(Path(str(item["metadata_path"])))
+            segments = parse_soulx_metadata_segments(
+                Path(str(item["metadata_path"])),
+                language=args.language,
+                aligned_item=item,
+            )
             for segment in segments:
                 print(
                     json.dumps(
@@ -536,9 +735,10 @@ def main() -> int:
                             "segment_id": segment.segment_id,
                             "segment_start_sec": round(segment.start_sec, 3),
                             "segment_end_sec": round(segment.end_sec, 3),
+                            "language": segment.language,
                             "lyrics": segment.lyrics,
-                            "n_chars": len(segment.chars),
-                            "first_chars": [
+                            "n_units": len(segment.chars),
+                            "first_units": [
                                 {
                                     "char": c.char,
                                     "start_sec": round(c.start_sec, 3),
@@ -566,7 +766,11 @@ def main() -> int:
         for idx, item in enumerate(items, start=1):
             print(f"[{idx}/{len(items)}] {item.get('id')}")
             try:
-                segments = parse_soulx_metadata_segments(Path(str(item["metadata_path"])))
+                segments = parse_soulx_metadata_segments(
+                    Path(str(item["metadata_path"])),
+                    language=args.language,
+                    aligned_item=item,
+                )
             except Exception as exc:
                 failed = {
                     "id": item.get("id"),

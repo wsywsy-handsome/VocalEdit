@@ -16,10 +16,10 @@ import streamlit.components.v1 as components
 
 
 DEFAULT_TASK_MANIFEST = Path(
-    "pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_100_chinese.jsonl"
+    "pipeline/manifests/02_lyric_edit_tasks.music_example_en_15s.jsonl"
 )
 DEFAULT_RESULT_MANIFEST = Path(
-    "pipeline/runs/yingmusic_lyric_edit_gtsinger_mini_100_chinese_hardmask_with_offset/inference_results.jsonl"
+    "pipeline/runs/yingmusic_lyric_edit_music_example_eh_15s/inference_results.jsonl"
 )
 DEFAULT_SOULX_RESULT_MANIFEST = Path(
     "pipeline/runs/soulx_lyric_edit_gtsinger_mini_100_chinese/inference_results.jsonl"
@@ -124,6 +124,18 @@ def merge_tasks(
         row["yingmusic_result"] = yingmusic_result
         row["yingmusic_output_path"] = yingmusic_result.get("output_path")
         row["yingmusic_status"] = yingmusic_result.get("status", "missing")
+        row["model_audio_path"] = yingmusic_result.get("model_audio_path")
+        row["segment_audio_path"] = yingmusic_result.get("segment_audio_path") or row.get("segment_audio_path")
+        for key in (
+            "segment_start_sec",
+            "segment_end_sec",
+            "local_edit_start_sec",
+            "local_edit_end_sec",
+            "model_edit_start_sec",
+            "model_edit_end_sec",
+        ):
+            if key in yingmusic_result:
+                row[key] = yingmusic_result[key]
         row["soulx_result"] = soulx_result
         row["soulx_output_path"] = soulx_result.get("output_path")
         row["soulx_status"] = soulx_result.get("status", "missing")
@@ -142,6 +154,34 @@ def highlight_text(text: str, start: int | None, end: int | None, css_class: str
         + "</mark>"
         + html.escape(text[end:])
     )
+
+
+def edited_highlight_span(row: dict[str, Any]) -> tuple[int | None, int | None]:
+    start = row.get("char_start")
+    if start is None:
+        return None, None
+    try:
+        start = int(start)
+    except (TypeError, ValueError):
+        return None, None
+
+    edited = str(row.get("edited_lyrics", ""))
+    replacement = str(row.get("replacement_word", ""))
+    explicit_end = row.get("edited_char_end")
+    if explicit_end is not None:
+        try:
+            explicit_end = int(explicit_end)
+        except (TypeError, ValueError):
+            explicit_end = None
+        if explicit_end is not None and edited[start:explicit_end] == replacement:
+            return start, explicit_end
+
+    if replacement:
+        replacement_end = start + len(replacement)
+        if edited[start:replacement_end] == replacement:
+            return start, replacement_end
+
+    return start, row.get("char_end")
 
 
 def waveform_polyline(
@@ -179,6 +219,7 @@ def render_daw(
     original_audio_uri: str,
     yingmusic_audio_uri: str,
     soulx_audio_uri: str,
+    original_label: str = "Original",
 ) -> str:
     width = 1180
     left = 104
@@ -237,6 +278,7 @@ def render_daw(
 
     escaped_id = html.escape(task_id)
     edit_text = html.escape(f"edit {edit_start:.2f}s - {edit_end:.2f}s")
+    original_label = html.escape(original_label)
     original_audio_uri = html.escape(original_audio_uri, quote=True)
     yingmusic_audio_uri = html.escape(yingmusic_audio_uri, quote=True)
     soulx_audio_uri = html.escape(soulx_audio_uri, quote=True)
@@ -294,7 +336,7 @@ def render_daw(
     <div><strong>{escaped_id}</strong></div>
     <div class="transport">
       <button id="playBtn" type="button">Play</button>
-      <button id="origBtn" type="button" class="active">Original</button>
+      <button id="origBtn" type="button" class="active">{original_label}</button>
       <button id="yingBtn" type="button">YingMusic</button>
       <button id="soulxBtn" type="button">SoulX</button>
       <span class="time-readout"><span id="timeNow">0.00</span>s / {total_duration:.2f}s</span>
@@ -308,7 +350,7 @@ def render_daw(
       <rect id="yingTrack" class="track-bg" data-track="yingmusic" x="{left}" y="{y_yingmusic}" width="{inner_w}" height="{track_h}" rx="2" fill="#fbfdff" stroke="#d9e0ea" />
       <rect id="soulxTrack" class="track-bg" data-track="soulx" x="{left}" y="{y_soulx}" width="{inner_w}" height="{track_h}" rx="2" fill="#fbfdff" stroke="#d9e0ea" />
       <rect x="{edit_x:.2f}" y="{top}" width="{edit_w:.2f}" height="{region_h}" fill="#f97316" opacity="0.18" pointer-events="none" />
-      <text x="16" y="{y_original + track_h / 2 + 4:.2f}" class="track-label">Original</text>
+      <text x="16" y="{y_original + track_h / 2 + 4:.2f}" class="track-label">{original_label}</text>
       <text x="16" y="{y_yingmusic + track_h / 2 + 4:.2f}" class="track-label">YingMusic</text>
       <text x="16" y="{y_soulx + track_h / 2 + 4:.2f}" class="track-label">SoulX</text>
       <path d="{orig_path}" class="wave" fill="#2563eb" opacity="0.72" />
@@ -471,6 +513,23 @@ def existing_path(path_text: str | None) -> Path | None:
     return path if path.exists() else None
 
 
+def load_optional_jsonl(path_text: str) -> list[dict[str, Any]]:
+    if not path_text.strip():
+        return []
+    path = Path(path_text).expanduser()
+    if not path.exists():
+        return []
+    return load_jsonl(path_text)
+
+
+def as_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
 
 def main() -> None:
     st.markdown(CSS, unsafe_allow_html=True)
@@ -481,15 +540,15 @@ def main() -> None:
         task_manifest = st.text_input("Task manifest", str(DEFAULT_TASK_MANIFEST))
         result_manifest = st.text_input("YingMusic result manifest", str(DEFAULT_RESULT_MANIFEST))
         soulx_result_manifest = st.text_input(
-            "SoulX result manifest", str(DEFAULT_SOULX_RESULT_MANIFEST)
+            "SoulX result manifest (optional)", str(DEFAULT_SOULX_RESULT_MANIFEST)
         )
         st.divider()
         st.header("Task")
 
     try:
         tasks = load_jsonl(task_manifest)
-        yingmusic_results = load_jsonl(result_manifest)
-        soulx_results = load_jsonl(soulx_result_manifest)
+        yingmusic_results = load_optional_jsonl(result_manifest)
+        soulx_results = load_optional_jsonl(soulx_result_manifest)
     except Exception as exc:
         st.error(f"Failed to load manifests: {exc}")
         return
@@ -506,14 +565,30 @@ def main() -> None:
         st.caption(f"{index + 1} / {len(rows)}")
 
     row = rows[index]
-    original_path = existing_path(row.get("audio_path"))
+    source_path = existing_path(row.get("source_audio_path") or row.get("audio_path"))
+    segment_path = existing_path(row.get("segment_audio_path") or row.get("model_audio_path"))
+    original_path = segment_path or source_path
     yingmusic_path = existing_path(row.get("yingmusic_output_path"))
     soulx_path = existing_path(row.get("soulx_output_path"))
-    edit_start = float(row.get("edit_start_sec", 0.0))
-    edit_end = float(row.get("edit_end_sec", edit_start))
+    is_segment_view = segment_path is not None
+    is_segment_task = row.get("segment_start_sec") is not None and row.get("segment_end_sec") is not None
+    local_edit_start = as_float(
+        row.get("local_edit_start_sec", row.get("model_edit_start_sec")), 0.0
+    )
+    local_edit_end = as_float(
+        row.get("local_edit_end_sec", row.get("model_edit_end_sec")), local_edit_start
+    )
+    global_edit_start = as_float(row.get("edit_start_sec"), local_edit_start)
+    global_edit_end = as_float(row.get("edit_end_sec"), global_edit_start)
+    if is_segment_view:
+        edit_start = local_edit_start
+        edit_end = local_edit_end
+    else:
+        edit_start = global_edit_start
+        edit_end = global_edit_end
 
     if not original_path:
-        st.error(f"Original audio missing: {row.get('audio_path')}")
+        st.error(f"Original/segment audio missing: {row.get('audio_path')}")
         return
 
     original_wave = load_waveform(str(original_path))
@@ -528,19 +603,33 @@ def main() -> None:
     )
 
     top_cols = st.columns([1.4, 1, 1, 1])
-    top_cols[0].markdown(f'<div class="task-title">{html.escape(row["id"])}</div>', unsafe_allow_html=True)
+    title = html.escape(row["id"])
+    if row.get("segment_index") is not None:
+        title += f' <span style="color:#64748b;font-size:.9rem;">segment {row.get("segment_index")}</span>'
+    top_cols[0].markdown(f'<div class="task-title">{title}</div>', unsafe_allow_html=True)
     top_cols[1].metric("修改部分", f'{row.get("original_word", "")} → {row.get("replacement_word", "")}')
-    top_cols[2].metric("起始", f"{edit_start:.3f}s")
-    top_cols[3].metric("结束", f"{edit_end:.3f}s")
+    time_label = "段内" if is_segment_view else "全局"
+    top_cols[2].metric(f"{time_label}起始", f"{edit_start:.3f}s")
+    top_cols[3].metric(f"{time_label}结束", f"{edit_end:.3f}s")
+
+    if is_segment_task:
+        segment_cols = st.columns(3)
+        segment_cols[0].metric("全局起止", f"{global_edit_start:.3f}-{global_edit_end:.3f}s")
+        segment_cols[1].metric("段内起止", f"{local_edit_start:.3f}-{local_edit_end:.3f}s")
+        segment_cols[2].metric(
+            "Segment",
+            f'{as_float(row.get("segment_start_sec")):.2f}-{as_float(row.get("segment_end_sec")):.2f}s',
+        )
 
     lyric_cols = st.columns(2)
     char_start = row.get("char_start")
     char_end = row.get("char_end")
+    edited_start, edited_end = edited_highlight_span(row)
     original_html = highlight_text(
         row.get("original_lyrics", ""), char_start, char_end, "edit-original"
     )
     edited_html = highlight_text(
-        row.get("edited_lyrics", ""), char_start, char_end, "edit-new"
+        row.get("edited_lyrics", ""), edited_start, edited_end, "edit-new"
     )
     lyric_cols[0].markdown(
         f'<div class="lyric-label">原歌词</div><div class="lyric-box">{original_html}</div>',
@@ -563,18 +652,21 @@ def main() -> None:
             audio_data_uri(original_path),
             audio_data_uri(yingmusic_path),
             audio_data_uri(soulx_path),
+            "Segment" if is_segment_view else "Original",
         ),
         height=420,
         scrolling=False,
     )
 
-    path_cols = st.columns(3)
-    path_cols[0].caption("原音频")
-    path_cols[0].code(str(original_path), language=None)
-    path_cols[1].caption("YingMusic 修改音频")
-    path_cols[1].code(str(yingmusic_path) if yingmusic_path else "音频文件不存在", language=None)
-    path_cols[2].caption("SoulX 对照音频")
-    path_cols[2].code(str(soulx_path) if soulx_path else "音频文件不存在", language=None)
+    path_cols = st.columns(4)
+    path_cols[0].caption("源音频")
+    path_cols[0].code(str(source_path) if source_path else "音频文件不存在", language=None)
+    path_cols[1].caption("Segment 输入音频")
+    path_cols[1].code(str(segment_path) if segment_path else "未使用 segment 输入", language=None)
+    path_cols[2].caption("YingMusic 修改音频")
+    path_cols[2].code(str(yingmusic_path) if yingmusic_path else "音频文件不存在", language=None)
+    path_cols[3].caption("SoulX 对照音频")
+    path_cols[3].code(str(soulx_path) if soulx_path else "音频文件不存在", language=None)
 
     with st.expander("Task JSON"):
         st.json(row, expanded=False)

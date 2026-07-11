@@ -126,7 +126,7 @@ python pipeline/scripts/run_soulx_alignment_batch.py \
   --conda-env align \
   --language Mandarin \
   --device cuda \
-  --max-merge-duration 30000 \
+  --max-merge-duration 15000 \
   --extensions .wav .flac .mp3 .m4a .ogg
 ```
 
@@ -194,7 +194,7 @@ cp pipeline/runs/soulx_align_gtsinger_mini_40_chinese/alignment_results.jsonl \
 pipeline/scripts/create_lyric_edit_tasks.py
 ```
 
-用途：读取 SoulX 对齐结果中的 `metadata.json`，按 SoulX segment 还原 ASR 歌词和每个中文字的时间戳，然后调用 DeepSeek 为每个有效 segment 选择一个词并替换为同字数、不同拼音的词。长音频会自然拆成多个短任务。
+用途：读取 SoulX 对齐结果中的 `metadata.json`，按 SoulX segment 还原 ASR 歌词和时间戳，然后调用 DeepSeek 为每个有效 segment 选择一个局部歌词替换任务。中文按字处理，并要求替换词同字数且每个字拼音不同；英文按 word token 处理，并要求替换短语同词数但不做音素校验。长音频会自然拆成多个短任务。
 
 示例命令：
 
@@ -204,6 +204,19 @@ python pipeline/scripts/create_lyric_edit_tasks.py \
   --output pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_40_chinese.jsonl \
   --env-file pipeline/.env \
   --model deepseek-chat \
+  --language Chinese \
+  --overwrite
+```
+
+英文任务示例：
+
+```bash
+python pipeline/scripts/create_lyric_edit_tasks.py \
+  --input-manifest pipeline/manifests/01_align.music_example_en_15s.jsonl \
+  --output pipeline/manifests/02_lyric_edit_tasks.music_example_en_15s.jsonl \
+  --env-file pipeline/.env \
+  --model deepseek-chat \
+  --language English \
   --overwrite
 ```
 
@@ -212,6 +225,7 @@ python pipeline/scripts/create_lyric_edit_tasks.py \
 ```bash
 python pipeline/scripts/create_lyric_edit_tasks.py \
   --input-manifest pipeline/manifests/01_aligned.gtsinger_mini_40_chinese.jsonl \
+  --language auto \
   --dry-run
 ```
 
@@ -257,7 +271,8 @@ pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_40_chinese.failed.jsonl
 | `--model` | DeepSeek 模型名 | `deepseek-v4-flash` |
 | `--base-url` | DeepSeek Chat Completions API 地址 | `https://api.deepseek.com/chat/completions` |
 | `--max-retries` | LLM 返回不合法时的最大重试次数 | `3` |
-| `--max-word-len` | 允许修改的最长词长 | `4` |
+| `--max-word-len` | 允许修改的最长长度；中文为汉字数，英文为 word 数 | `4` |
+| `--language` | 任务语言，`auto` 会读取 manifest/metadata；可显式指定 `Chinese` 或 `English` | `auto` |
 | `--timeout` | 单次 API 请求超时秒数 | `60.0` |
 | `--seed` | 随机种子 | `20260706` |
 | `--limit` | 只处理前 N 条，用于调试 | 不限制 |
@@ -429,12 +444,14 @@ pipeline/scripts/view_lyric_edit_tasks.py
 - 原歌词。
 - 修改后歌词。
 - 修改词和替换词。
-- 修改起止时间。
-- 类 DAW 的三音轨 waveform，分别展示原音频、YingMusic 修改音频和 SoulX 对照音频。
+- 修改起止时间；segment 任务会同时显示全局时间和段内时间。
+- 类 DAW 的三音轨 waveform，分别展示原始/segment 输入音频、YingMusic 修改音频和 SoulX 对照音频。
 - 红色竖线播放头穿过三条音轨，播放时随时间移动。
 - 点击音轨或按钮选择当前播放音轨，每次只播放选中的一条。
 - 按空格键播放/暂停，点击或拖动播放头区域可以定位。
-- 编辑区高亮显示修改时间范围。
+- 编辑区高亮显示当前播放时间轴上的修改范围；如果存在 segment 输入音频，则使用段内时间，否则使用源音频的全局时间。
+
+YingMusic 和 SoulX 的结果 manifest 都可以暂时为空或不存在。这样可以在只生成 task、尚未推理完成时先检查歌词和时间戳。
 
 启动命令：
 
@@ -454,11 +471,12 @@ http://127.0.0.1:8501
 默认读取：
 
 ```text
-pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_40_chinese.jsonl
-pipeline/runs/yingmusic_lyric_edit_gtsinger_mini_40_chinese_hardmask/inference_results.jsonl
+pipeline/manifests/lyric_edit_tasks.music_example_zh.segmented.jsonl
+pipeline/runs/yingmusic_lyric_edit_music_example_zh_segmented/inference_results.jsonl
+pipeline/runs/soulx_lyric_edit_gtsinger_mini_100_chinese/inference_results.jsonl
 ```
 
-如果要查看别的任务文件或推理结果，可以在页面左侧 sidebar 里修改 `Task manifest` 和 `Result manifest` 路径。
+如果要查看别的任务文件或推理结果，可以在页面左侧 sidebar 里修改 `Task manifest`、`YingMusic result manifest` 和 `SoulX result manifest` 路径。
 
 ## 通用音频扫描脚本
 
@@ -578,6 +596,7 @@ python pipeline/scripts/create_lyric_edit_tasks.py \
   --output pipeline/manifests/02_lyric_edit_tasks.gtsinger_mini_40_chinese.jsonl \
   --env-file pipeline/.env \
   --model deepseek-chat \
+  --language Chinese \
   --overwrite
 
 HF_ENDPOINT=https://hf-mirror.com python pipeline/scripts/run_yingmusic_lyric_edit_tasks.py \

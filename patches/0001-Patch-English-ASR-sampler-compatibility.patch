@@ -1,14 +1,14 @@
 From 840f5bdd8f4d7e3f78b7eb9bdc5bf51afff1f954 Mon Sep 17 00:00:00 2001
 From: VocalEdit <vocaledit@example.com>
 Date: Tue, 7 Jul 2026 00:37:56 +0000
-Subject: [PATCH] Patch English ASR sampler compatibility
+Subject: [PATCH] Patch English ASR compatibility
 
 ---
- preprocess/tools/lyric_transcription.py | 20 ++++++++++++++++++++
- 1 file changed, 20 insertions(+)
+ preprocess/tools/lyric_transcription.py | 45 +++++++++++++++++++++++++++++++++++++++++++++
+ 1 file changed, 45 insertions(+)
 
 diff --git a/preprocess/tools/lyric_transcription.py b/preprocess/tools/lyric_transcription.py
-index 7843564..737b7cd 100644
+index 7843564..eddcc69 100644
 --- a/preprocess/tools/lyric_transcription.py
 +++ b/preprocess/tools/lyric_transcription.py
 @@ -132,6 +132,25 @@ class _ASRZhModel:
@@ -37,7 +37,41 @@ index 7843564..737b7cd 100644
      def __init__(self, model_path: str, device: str):
          try:
              import nemo.collections.asr as nemo_asr  # type: ignore
-@@ -160,6 +179,7 @@ class _ASREnModel:
+@@ -145,8 +164,33 @@ class _ASREnModel:
+             restore_path=model_path,
+             map_location=device,
+         )
++        self._disable_cuda_graph_decoder()
+         self.model.eval()
+ 
++    def _disable_cuda_graph_decoder(self) -> None:
++        """Disable NeMo's CUDA-graph TDT decoder for CUDA binding compatibility.
++
++        Some cuda-bindings/NeMo combinations crash inside the fast TDT
++        CUDA-graph path with a `cu_call` return-value mismatch. The slower
++        non-graph greedy batch decoder keeps the same ASR output format and
++        is reliable for our preprocessing workload.
++        """
++        try:
++            from copy import deepcopy
++            from omegaconf import OmegaConf, open_dict
++        except Exception:
++            return
++
++        decoding_cfg = deepcopy(self.model.cfg.decoding)
++        with open_dict(decoding_cfg):
++            if not OmegaConf.select(decoding_cfg, "greedy"):
++                decoding_cfg.greedy = {}
++            decoding_cfg.greedy.use_cuda_graph_decoder = False
++        try:
++            self.model.change_decoding_strategy(decoding_cfg, verbose=False)
++        except TypeError:
++            self.model.change_decoding_strategy(decoding_cfg)
++
+     @staticmethod
+     def _clean_word(word: str) -> str:
+         return re.sub(r"[\?\.,:]", "", word).strip()
+@@ -160,6 +204,7 @@ class _ASREnModel:
          return word_ts if isinstance(word_ts, list) else []
  
      def process(self, wav_fn: str) -> Tuple[List[str], List[float]]:
@@ -45,6 +79,6 @@ index 7843564..737b7cd 100644
          outputs = self.model.transcribe(
              [wav_fn],
              timestamps=True,
+
 -- 
 2.34.1
-
