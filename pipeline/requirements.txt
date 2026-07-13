@@ -1,0 +1,5 @@
+requests>=2.31.0
+pypinyin>=0.55.0
+numpy>=1.24.0
+soundfile>=0.12.1
+streamlit>=1.36.0
