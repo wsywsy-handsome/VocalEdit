@@ -152,6 +152,22 @@ def is_english_token(text: str) -> bool:
     return bool(ENGLISH_TOKEN_RE.fullmatch(text))
 
 
+def is_chinese_mode_token(text: str) -> bool:
+    return is_chinese_text(text) or is_english_token(text)
+
+
+def needs_mixed_lyric_space(left: str, right: str) -> bool:
+    return bool(left and right and (is_english_token(left[-1]) or is_english_token(right[0])))
+
+
+def append_mixed_lyric_part(parts: list[str], token: str) -> int:
+    if parts and needs_mixed_lyric_space(parts[-1], token):
+        parts.append(" ")
+    text_start = sum(len(part) for part in parts)
+    parts.append(token)
+    return text_start
+
+
 def normalize_soulx_token(token: str) -> str:
     return token.replace("<AP>", "<SP>")
 
@@ -211,17 +227,21 @@ def parse_soulx_metadata_segments(
                 continue
             if note_type == 2:
                 if resolved_language == "Chinese":
-                    if not is_chinese_text(word):
+                    if not is_chinese_mode_token(word):
                         continue
+                    text_start = append_mixed_lyric_part(lyric_parts, word)
+                    text_end = text_start + len(word)
                     chars.append(
                         LyricChar(
                             char=word,
-                            char_index=len(chars),
+                            char_index=text_start,
                             start_sec=start_sec,
                             end_sec=end_sec,
                             source_segment=seg_idx,
                             source_token_index=token_idx,
                             note_type=note_type,
+                            text_start=text_start,
+                            text_end=text_end,
                         )
                     )
                 else:
@@ -254,7 +274,7 @@ def parse_soulx_metadata_segments(
 
             raise TaskError(f"Unsupported note_type={note_type} in {metadata_path}")
 
-        lyrics = "".join(item.char for item in chars) if resolved_language == "Chinese" else "".join(lyric_parts)
+        lyrics = "".join(lyric_parts)
         if lyrics:
             parsed_segments.append(
                 LyricSegment(
@@ -283,12 +303,15 @@ def parse_soulx_metadata(metadata_path: Path) -> tuple[str, list[LyricChar]]:
         if lyrics_parts and segment.language == "English":
             lyrics_parts.append(" ")
             text_offset += 1
+        elif lyrics_parts and segment.language == "Chinese" and needs_mixed_lyric_space(lyrics_parts[-1], segment.lyrics):
+            lyrics_parts.append(" ")
+            text_offset += 1
         lyrics_parts.append(segment.lyrics)
         for char in segment.chars:
             chars.append(
                 LyricChar(
                     char=char.char,
-                    char_index=(text_offset + char.char_index if segment.language == "English" else offset + char.char_index),
+                    char_index=(text_offset + char.char_index if segment.language == "English" else text_offset + char.char_index),
                     start_sec=char.start_sec,
                     end_sec=char.end_sec,
                     source_segment=char.source_segment,
@@ -350,6 +373,39 @@ def find_english_token_span(
     if chars[matched[0]].text_start != char_start or chars[matched[-1]].text_end != char_end:
         raise TaskError("char span must align to complete English token boundaries")
     return char_start, char_end, matched[0], matched[-1] + 1
+
+
+def find_chinese_text_span(
+    *,
+    lyrics: str,
+    chars: list[LyricChar],
+    original_word: str,
+    char_start: int,
+    char_end: int,
+) -> list[LyricChar]:
+    if not (0 <= char_start < char_end <= len(lyrics)):
+        raise TaskError("char_start/char_end out of range")
+    if lyrics[char_start:char_end] != original_word:
+        raise TaskError(
+            f"original_word does not match lyrics span: "
+            f"{original_word!r} != {lyrics[char_start:char_end]!r}"
+        )
+
+    matched = [
+        item
+        for item in chars
+        if item.text_start is not None
+        and item.text_end is not None
+        and item.text_start >= char_start
+        and item.text_end <= char_end
+    ]
+    if not matched:
+        raise TaskError("char span does not cover any Chinese lyric unit")
+    if matched[0].text_start != char_start or matched[-1].text_end != char_end:
+        raise TaskError("char span must align to complete lyric unit boundaries")
+    if any(not is_chinese_text(item.char) for item in matched):
+        raise TaskError("Chinese edit span may not include English lyric tokens")
+    return matched
 
 
 def validate_edit(
@@ -439,11 +495,13 @@ def validate_edit(
         raise TaskError("original_word and replacement_word must be Chinese only")
     if len(original_word) != len(replacement_word):
         raise TaskError("replacement_word must have the same length as original_word")
-    if lyrics[char_start:char_end] != original_word:
-        raise TaskError(
-            f"original_word does not match lyrics span: "
-            f"{original_word!r} != {lyrics[char_start:char_end]!r}"
-        )
+    edit_chars = find_chinese_text_span(
+        lyrics=lyrics,
+        chars=chars,
+        original_word=original_word,
+        char_start=char_start,
+        char_end=char_end,
+    )
     if original_word == replacement_word:
         raise TaskError("replacement_word is identical to original_word")
 
@@ -460,10 +518,6 @@ def validate_edit(
     edited_lyrics = lyrics[:char_start] + replacement_word + lyrics[char_end:]
     if edited_lyrics == lyrics:
         raise TaskError("edited lyrics did not change")
-
-    edit_chars = chars[char_start:char_end]
-    if not edit_chars:
-        raise TaskError("empty edit char span")
 
     return {
         "original_word": original_word,
@@ -526,7 +580,7 @@ JSON format:
 """
         system_content = "You are an English lyric editing assistant. Output exactly one strict JSON object."
     else:
-        indexed_chars = " ".join(f"{item.char_index}:{item.char}" for item in chars)
+        indexed_chars = " ".join(f"{item.char_index}:{item.char}" for item in chars if is_chinese_text(item.char))
         user_content = f"""请为下面的中文歌词设计一个局部歌词替换任务。
 
 原歌词：{lyrics}

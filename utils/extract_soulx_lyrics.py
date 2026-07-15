@@ -100,6 +100,22 @@ def is_english_token(text: str) -> bool:
     return bool(ENGLISH_TOKEN_RE.fullmatch(text))
 
 
+def is_chinese_mode_token(text: str) -> bool:
+    return is_chinese_text(text) or is_english_token(text)
+
+
+def needs_mixed_lyric_space(left: str, right: str) -> bool:
+    return bool(left and right and (is_english_token(left[-1]) or is_english_token(right[0])))
+
+
+def append_mixed_lyric_part(parts: list[str], token: str) -> int:
+    if parts and needs_mixed_lyric_space(parts[-1], token):
+        parts.append(" ")
+    text_start = sum(len(part) for part in parts)
+    parts.append(token)
+    return text_start
+
+
 def normalize_soulx_token(token: str) -> str:
     return token.replace("<AP>", "<SP>")
 
@@ -199,17 +215,21 @@ def parse_soulx_segments(
 
             if note_type == 2:
                 if resolved_language == "Chinese":
-                    if not is_chinese_text(word):
+                    if not is_chinese_mode_token(word):
                         continue
+                    text_start = append_mixed_lyric_part(lyric_parts, word)
+                    text_end = text_start + len(word)
                     units.append(
                         LyricUnit(
                             char=word,
-                            char_index=len(units),
+                            char_index=text_start,
                             start_sec=start_sec,
                             end_sec=end_sec,
                             source_segment=seg_idx,
                             source_token_index=token_idx,
                             note_type=note_type,
+                            text_start=text_start,
+                            text_end=text_end,
                         )
                     )
                 else:
@@ -243,7 +263,7 @@ def parse_soulx_segments(
 
             raise LyricParseError(f"Unsupported note_type={note_type} in {source_label}")
 
-        lyrics = "".join(item.char for item in units) if resolved_language == "Chinese" else "".join(lyric_parts)
+        lyrics = "".join(lyric_parts)
         if lyrics:
             parsed_segments.append(
                 LyricSegment(
@@ -271,6 +291,9 @@ def merge_lyrics(parsed_segments: list[LyricSegment]) -> tuple[str, list[LyricUn
         if lyrics_parts and segment.language == "English":
             lyrics_parts.append(" ")
             text_offset += 1
+        elif lyrics_parts and segment.language == "Chinese" and needs_mixed_lyric_space(lyrics_parts[-1], segment.lyrics):
+            lyrics_parts.append(" ")
+            text_offset += 1
         lyrics_parts.append(segment.lyrics)
 
         for unit in segment.units:
@@ -280,7 +303,7 @@ def merge_lyrics(parsed_segments: list[LyricSegment]) -> tuple[str, list[LyricUn
                     char_index=(
                         text_offset + unit.char_index
                         if segment.language == "English"
-                        else unit_offset + unit.char_index
+                        else text_offset + unit.char_index
                     ),
                     start_sec=unit.start_sec,
                     end_sec=unit.end_sec,

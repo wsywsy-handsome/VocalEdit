@@ -52,6 +52,8 @@ SoulX segment 需要包含这些字段：
 - `2`：新歌词 token，中文按字加入，英文按 word 加入
 - `3`：延长前一个歌词 token 的结束时间，不新增歌词
 
+中文 metadata 中如果混有英文 word，英文 word 会被保留，不会被丢弃。输出文本会在中英文边界和连续英文 word 之间插入空格，例如 `我 love you 你`。
+
 ### 输出模式
 
 `lines` 模式：
@@ -128,7 +130,7 @@ python3 utils/extract_soulx_lyrics.py \
 | `input_line` | 来源 JSONL 行号，从 `1` 开始；单个 JSON 输入时为 `null`。 |
 | `language` | 解析使用的语言，`Chinese` 或 `English`。 |
 | `lyrics` | 当前 metadata 下所有 segment 合并后的完整歌词。 |
-| `n_units` | 当前 metadata 下解析出的歌词单元总数；中文为汉字数，英文为 word 数。 |
+| `n_units` | 当前 metadata 下解析出的歌词单元总数；中文为汉字数，英文为 word 数；中文混英文时英文 word 也计为一个 unit。 |
 | `segments` | 当前 metadata 下每个 SoulX segment 的解析结果。 |
 
 每个 `segment` 字段：
@@ -149,6 +151,6 @@ python3 utils/extract_soulx_lyrics.py \
 
 | 字段 | 说明 |
 | --- | --- |
-| `char` | 歌词单元文本；中文为单个汉字，英文为一个 word。 |
+| `char` | 歌词单元文本；中文为单个汉字，英文或中文混英文时可为一个英文 word。 |
 | `start_sec` | 该歌词单元起始时间，单位秒。 |
 | `end_sec` | 该歌词单元结束时间，单位秒；遇到 `note_type=3` 时会延长到重复发声结束。 |
